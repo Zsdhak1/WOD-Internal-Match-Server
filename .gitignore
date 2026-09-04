@@ -1,0 +1,22 @@
+# CMake and compiler output
+build/
+cmake-build-*/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+
+# Qt Creator local configuration
+.qtcreator/
+*.user
+*.user.*
+.qmake.stash
+
+# IDE and local agent state
+.vs/
+.vscode/
+.claude/
+.learnings/
+
