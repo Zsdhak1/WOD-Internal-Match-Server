@@ -1,0 +1,843 @@
+﻿{
+    "image_width":  2559,
+    "image_height":  1439,
+    "coordinate_origin":  "top-left",
+    "boxes":  [
+                  {
+                      "id":  "E01",
+                      "name":  "Left team HUD",
+                      "pixel":  {
+                                    "x":  170,
+                                    "y":  10,
+                                    "width":  825,
+                                    "height":  120
+                                },
+                      "relative":  {
+                                       "x":  0.066432,
+                                       "y":  0.006949,
+                                       "width":  0.322392,
+                                       "height":  0.083391
+                                   },
+                      "percent":  {
+                                      "x":  6.64,
+                                      "y":  0.69,
+                                      "width":  32.24,
+                                      "height":  8.34
+                                  }
+                  },
+                  {
+                      "id":  "E02",
+                      "name":  "Right team HUD",
+                      "pixel":  {
+                                    "x":  1550,
+                                    "y":  10,
+                                    "width":  840,
+                                    "height":  120
+                                },
+                      "relative":  {
+                                       "x":  0.605705,
+                                       "y":  0.006949,
+                                       "width":  0.328253,
+                                       "height":  0.083391
+                                   },
+                      "percent":  {
+                                      "x":  60.57,
+                                      "y":  0.69,
+                                      "width":  32.83,
+                                      "height":  8.34
+                                  }
+                  },
+                  {
+                      "id":  "E03",
+                      "name":  "Round timer score",
+                      "pixel":  {
+                                    "x":  1050,
+                                    "y":  0,
+                                    "width":  450,
+                                    "height":  135
+                                },
+                      "relative":  {
+                                       "x":  0.410317,
+                                       "y":  0,
+                                       "width":  0.17585,
+                                       "height":  0.093815
+                                   },
+                      "percent":  {
+                                      "x":  41.03,
+                                      "y":  0,
+                                      "width":  17.58,
+                                      "height":  9.38
+                                  }
+                  },
+                  {
+                      "id":  "E04",
+                      "name":  "Center resource HUD",
+                      "pixel":  {
+                                    "x":  1115,
+                                    "y":  118,
+                                    "width":  340,
+                                    "height":  128
+                                },
+                      "relative":  {
+                                       "x":  0.435717,
+                                       "y":  0.082001,
+                                       "width":  0.132864,
+                                       "height":  0.088951
+                                   },
+                      "percent":  {
+                                      "x":  43.57,
+                                      "y":  8.2,
+                                      "width":  13.29,
+                                      "height":  8.9
+                                  }
+                  },
+                  {
+                      "id":  "E05",
+                      "name":  "Blue energy alert",
+                      "pixel":  {
+                                    "x":  1065,
+                                    "y":  242,
+                                    "width":  470,
+                                    "height":  42
+                                },
+                      "relative":  {
+                                       "x":  0.416178,
+                                       "y":  0.168172,
+                                       "width":  0.183665,
+                                       "height":  0.029187
+                                   },
+                      "percent":  {
+                                      "x":  41.62,
+                                      "y":  16.82,
+                                      "width":  18.37,
+                                      "height":  2.92
+                                  }
+                  },
+                  {
+                      "id":  "E06",
+                      "name":  "Left radar alert",
+                      "pixel":  {
+                                    "x":  0,
+                                    "y":  246,
+                                    "width":  486,
+                                    "height":  43
+                                },
+                      "relative":  {
+                                       "x":  0,
+                                       "y":  0.170952,
+                                       "width":  0.189918,
+                                       "height":  0.029882
+                                   },
+                      "percent":  {
+                                      "x":  0,
+                                      "y":  17.1,
+                                      "width":  18.99,
+                                      "height":  2.99
+                                  }
+                  },
+                  {
+                      "id":  "E07",
+                      "name":  "Right radar alert",
+                      "pixel":  {
+                                    "x":  2074,
+                                    "y":  246,
+                                    "width":  485,
+                                    "height":  43
+                                },
+                      "relative":  {
+                                       "x":  0.810473,
+                                       "y":  0.170952,
+                                       "width":  0.189527,
+                                       "height":  0.029882
+                                   },
+                      "percent":  {
+                                      "x":  81.05,
+                                      "y":  17.1,
+                                      "width":  18.95,
+                                      "height":  2.99
+                                  }
+                  },
+                  {
+                      "id":  "E08",
+                      "name":  "Left roster group",
+                      "pixel":  {
+                                    "x":  70,
+                                    "y":  128,
+                                    "width":  945,
+                                    "height":  112
+                                },
+                      "relative":  {
+                                       "x":  0.027354,
+                                       "y":  0.088951,
+                                       "width":  0.369285,
+                                       "height":  0.077832
+                                   },
+                      "percent":  {
+                                      "x":  2.74,
+                                      "y":  8.9,
+                                      "width":  36.93,
+                                      "height":  7.78
+                                  }
+                  },
+                  {
+                      "id":  "E09",
+                      "name":  "Right roster group",
+                      "pixel":  {
+                                    "x":  1225,
+                                    "y":  128,
+                                    "width":  1275,
+                                    "height":  112
+                                },
+                      "relative":  {
+                                       "x":  0.478703,
+                                       "y":  0.088951,
+                                       "width":  0.498242,
+                                       "height":  0.077832
+                                   },
+                      "percent":  {
+                                      "x":  47.87,
+                                      "y":  8.9,
+                                      "width":  49.82,
+                                      "height":  7.78
+                                  }
+                  },
+                  {
+                      "id":  "E10",
+                      "name":  "Left unit card 1",
+                      "pixel":  {
+                                    "x":  76,
+                                    "y":  133,
+                                    "width":  160,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.029699,
+                                       "y":  0.092425,
+                                       "width":  0.062524,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  2.97,
+                                      "y":  9.24,
+                                      "width":  6.25,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E11",
+                      "name":  "Left unit card 2",
+                      "pixel":  {
+                                    "x":  232,
+                                    "y":  133,
+                                    "width":  165,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.09066,
+                                       "y":  0.092425,
+                                       "width":  0.064478,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  9.07,
+                                      "y":  9.24,
+                                      "width":  6.45,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E12",
+                      "name":  "Left unit card 3",
+                      "pixel":  {
+                                    "x":  392,
+                                    "y":  133,
+                                    "width":  167,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.153185,
+                                       "y":  0.092425,
+                                       "width":  0.06526,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  15.32,
+                                      "y":  9.24,
+                                      "width":  6.53,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E13",
+                      "name":  "Left unit card 4",
+                      "pixel":  {
+                                    "x":  553,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.2161,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  21.61,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E14",
+                      "name":  "Left unit card 5",
+                      "pixel":  {
+                                    "x":  708,
+                                    "y":  133,
+                                    "width":  165,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.276671,
+                                       "y":  0.092425,
+                                       "width":  0.064478,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  27.67,
+                                      "y":  9.24,
+                                      "width":  6.45,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E15",
+                      "name":  "Left unit card 6",
+                      "pixel":  {
+                                    "x":  862,
+                                    "y":  133,
+                                    "width":  158,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.33685,
+                                       "y":  0.092425,
+                                       "width":  0.061743,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  33.69,
+                                      "y":  9.24,
+                                      "width":  6.17,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E16",
+                      "name":  "Right unit card 1",
+                      "pixel":  {
+                                    "x":  1244,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.486127,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  48.61,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E17",
+                      "name":  "Right unit card 2",
+                      "pixel":  {
+                                    "x":  1398,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.546307,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  54.63,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E18",
+                      "name":  "Right unit card 3",
+                      "pixel":  {
+                                    "x":  1553,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.606878,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  60.69,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E19",
+                      "name":  "Right unit card 4",
+                      "pixel":  {
+                                    "x":  1708,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.667448,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  66.74,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E20",
+                      "name":  "Right unit card 5",
+                      "pixel":  {
+                                    "x":  1864,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.72841,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  72.84,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E21",
+                      "name":  "Right unit card 6",
+                      "pixel":  {
+                                    "x":  2019,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.78898,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  78.9,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E22",
+                      "name":  "Right unit card 7",
+                      "pixel":  {
+                                    "x":  2175,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.849941,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  84.99,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E23",
+                      "name":  "Right unit card 8",
+                      "pixel":  {
+                                    "x":  2330,
+                                    "y":  133,
+                                    "width":  164,
+                                    "height":  104
+                                },
+                      "relative":  {
+                                       "x":  0.910512,
+                                       "y":  0.092425,
+                                       "width":  0.064088,
+                                       "height":  0.072272
+                                   },
+                      "percent":  {
+                                      "x":  91.05,
+                                      "y":  9.24,
+                                      "width":  6.41,
+                                      "height":  7.23
+                                  }
+                  },
+                  {
+                      "id":  "E24",
+                      "name":  "Left battlefield stack",
+                      "pixel":  {
+                                    "x":  145,
+                                    "y":  560,
+                                    "width":  400,
+                                    "height":  355
+                                },
+                      "relative":  {
+                                       "x":  0.056663,
+                                       "y":  0.389159,
+                                       "width":  0.156311,
+                                       "height":  0.246699
+                                   },
+                      "percent":  {
+                                      "x":  5.67,
+                                      "y":  38.92,
+                                      "width":  15.63,
+                                      "height":  24.67
+                                  }
+                  },
+                  {
+                      "id":  "E25",
+                      "name":  "Right battlefield stack",
+                      "pixel":  {
+                                    "x":  1778,
+                                    "y":  505,
+                                    "width":  655,
+                                    "height":  300
+                                },
+                      "relative":  {
+                                       "x":  0.694803,
+                                       "y":  0.350938,
+                                       "width":  0.255959,
+                                       "height":  0.208478
+                                   },
+                      "percent":  {
+                                      "x":  69.48,
+                                      "y":  35.09,
+                                      "width":  25.6,
+                                      "height":  20.85
+                                  }
+                  },
+                  {
+                      "id":  "E26",
+                      "name":  "Blue outpost status",
+                      "pixel":  {
+                                    "x":  1347,
+                                    "y":  498,
+                                    "width":  300,
+                                    "height":  88
+                                },
+                      "relative":  {
+                                       "x":  0.526377,
+                                       "y":  0.346074,
+                                       "width":  0.117233,
+                                       "height":  0.061154
+                                   },
+                      "percent":  {
+                                      "x":  52.64,
+                                      "y":  34.61,
+                                      "width":  11.72,
+                                      "height":  6.12
+                                  }
+                  },
+                  {
+                      "id":  "E27",
+                      "name":  "Red outpost status",
+                      "pixel":  {
+                                    "x":  830,
+                                    "y":  590,
+                                    "width":  300,
+                                    "height":  85
+                                },
+                      "relative":  {
+                                       "x":  0.324345,
+                                       "y":  0.410007,
+                                       "width":  0.117233,
+                                       "height":  0.059069
+                                   },
+                      "percent":  {
+                                      "x":  32.43,
+                                      "y":  41,
+                                      "width":  11.72,
+                                      "height":  5.91
+                                  }
+                  },
+                  {
+                      "id":  "E28",
+                      "name":  "Battlefield main",
+                      "pixel":  {
+                                    "x":  0,
+                                    "y":  286,
+                                    "width":  2559,
+                                    "height":  870
+                                },
+                      "relative":  {
+                                       "x":  0,
+                                       "y":  0.198749,
+                                       "width":  1,
+                                       "height":  0.604587
+                                   },
+                      "percent":  {
+                                      "x":  0,
+                                      "y":  19.87,
+                                      "width":  100,
+                                      "height":  60.46
+                                  }
+                  },
+                  {
+                      "id":  "E29",
+                      "name":  "Caster lower third",
+                      "pixel":  {
+                                    "x":  90,
+                                    "y":  1210,
+                                    "width":  900,
+                                    "height":  126
+                                },
+                      "relative":  {
+                                       "x":  0.03517,
+                                       "y":  0.840862,
+                                       "width":  0.3517,
+                                       "height":  0.087561
+                                   },
+                      "percent":  {
+                                      "x":  3.52,
+                                      "y":  84.09,
+                                      "width":  35.17,
+                                      "height":  8.76
+                                  }
+                  },
+                  {
+                      "id":  "E30",
+                      "name":  "Match title footer",
+                      "pixel":  {
+                                    "x":  1000,
+                                    "y":  1300,
+                                    "width":  565,
+                                    "height":  139
+                                },
+                      "relative":  {
+                                       "x":  0.390778,
+                                       "y":  0.903405,
+                                       "width":  0.220789,
+                                       "height":  0.096595
+                                   },
+                      "percent":  {
+                                      "x":  39.08,
+                                      "y":  90.34,
+                                      "width":  22.08,
+                                      "height":  9.66
+                                  }
+                  },
+                  {
+                      "id":  "E31",
+                      "name":  "Minimap",
+                      "pixel":  {
+                                    "x":  1945,
+                                    "y":  1080,
+                                    "width":  610,
+                                    "height":  359
+                                },
+                      "relative":  {
+                                       "x":  0.760063,
+                                       "y":  0.750521,
+                                       "width":  0.238374,
+                                       "height":  0.249479
+                                   },
+                      "percent":  {
+                                      "x":  76.01,
+                                      "y":  75.05,
+                                      "width":  23.84,
+                                      "height":  24.95
+                                  }
+                  },
+                  {
+                      "id":  "E32",
+                      "name":  "Minimap controls",
+                      "pixel":  {
+                                    "x":  2485,
+                                    "y":  1268,
+                                    "width":  72,
+                                    "height":  118
+                                },
+                      "relative":  {
+                                       "x":  0.971082,
+                                       "y":  0.881167,
+                                       "width":  0.028136,
+                                       "height":  0.082001
+                                   },
+                      "percent":  {
+                                      "x":  97.11,
+                                      "y":  88.12,
+                                      "width":  2.81,
+                                      "height":  8.2
+                                  }
+                  },
+                  {
+                      "id":  "E33",
+                      "name":  "Left red unit 1",
+                      "pixel":  {
+                                    "x":  165,
+                                    "y":  655,
+                                    "width":  190,
+                                    "height":  102
+                                },
+                      "relative":  {
+                                       "x":  0.064478,
+                                       "y":  0.455177,
+                                       "width":  0.074248,
+                                       "height":  0.070883
+                                   },
+                      "percent":  {
+                                      "x":  6.45,
+                                      "y":  45.52,
+                                      "width":  7.42,
+                                      "height":  7.09
+                                  }
+                  },
+                  {
+                      "id":  "E34",
+                      "name":  "Left red unit 2",
+                      "pixel":  {
+                                    "x":  92,
+                                    "y":  764,
+                                    "width":  185,
+                                    "height":  110
+                                },
+                      "relative":  {
+                                       "x":  0.035952,
+                                       "y":  0.530924,
+                                       "width":  0.072294,
+                                       "height":  0.076442
+                                   },
+                      "percent":  {
+                                      "x":  3.6,
+                                      "y":  53.09,
+                                      "width":  7.23,
+                                      "height":  7.64
+                                  }
+                  },
+                  {
+                      "id":  "E35",
+                      "name":  "Left red unit 3",
+                      "pixel":  {
+                                    "x":  265,
+                                    "y":  568,
+                                    "width":  214,
+                                    "height":  112
+                                },
+                      "relative":  {
+                                       "x":  0.103556,
+                                       "y":  0.394719,
+                                       "width":  0.083626,
+                                       "height":  0.077832
+                                   },
+                      "percent":  {
+                                      "x":  10.36,
+                                      "y":  39.47,
+                                      "width":  8.36,
+                                      "height":  7.78
+                                  }
+                  },
+                  {
+                      "id":  "E36",
+                      "name":  "Right blue unit 1",
+                      "pixel":  {
+                                    "x":  1810,
+                                    "y":  548,
+                                    "width":  285,
+                                    "height":  95
+                                },
+                      "relative":  {
+                                       "x":  0.707308,
+                                       "y":  0.38082,
+                                       "width":  0.111372,
+                                       "height":  0.066018
+                                   },
+                      "percent":  {
+                                      "x":  70.73,
+                                      "y":  38.08,
+                                      "width":  11.14,
+                                      "height":  6.6
+                                  }
+                  },
+                  {
+                      "id":  "E37",
+                      "name":  "Right blue unit 2",
+                      "pixel":  {
+                                    "x":  1930,
+                                    "y":  620,
+                                    "width":  305,
+                                    "height":  93
+                                },
+                      "relative":  {
+                                       "x":  0.754201,
+                                       "y":  0.430855,
+                                       "width":  0.119187,
+                                       "height":  0.064628
+                                   },
+                      "percent":  {
+                                      "x":  75.42,
+                                      "y":  43.09,
+                                      "width":  11.92,
+                                      "height":  6.46
+                                  }
+                  },
+                  {
+                      "id":  "E38",
+                      "name":  "Right blue unit 3",
+                      "pixel":  {
+                                    "x":  1995,
+                                    "y":  700,
+                                    "width":  190,
+                                    "height":  100
+                                },
+                      "relative":  {
+                                       "x":  0.779601,
+                                       "y":  0.486449,
+                                       "width":  0.074248,
+                                       "height":  0.069493
+                                   },
+                      "percent":  {
+                                      "x":  77.96,
+                                      "y":  48.64,
+                                      "width":  7.42,
+                                      "height":  6.95
+                                  }
+                  }
+              ]
+}

@@ -54,6 +54,8 @@ void RobotManager::handleDatagram(const QByteArray &data, const QHostAddress &ad
     switch (f.type) {
     case proto::TypeStatus:
         r.hp = f.hp;
+        if (f.hasHeat)
+            r.heat = f.heat;
         r.alive = f.alive;
         r.shootEnabled = f.shootEnabled;
         break;

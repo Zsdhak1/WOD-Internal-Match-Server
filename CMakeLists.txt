@@ -18,9 +18,13 @@ set(PROJECT_SOURCES
         mainwindow.h
         broadcastwindow.cpp
         broadcastwindow.h
+        matchprotocol.h
+        matchserver.cpp
+        matchserver.h
         protocol.h
         robotmanager.cpp
         robotmanager.h
+        broadcast_assets.qrc
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -48,6 +52,34 @@ endif()
 
 target_link_libraries(Scompetition PRIVATE Qt${QT_VERSION_MAJOR}::Widgets
 Qt${QT_VERSION_MAJOR}::Network)
+
+add_executable(ScompetitionClient
+        client_main.cpp
+        clientwindow.cpp
+        clientwindow.h
+        broadcastwindow.cpp
+        broadcastwindow.h
+        robotmanager.cpp
+        robotmanager.h
+        matchprotocol.h
+        protocol.h
+        broadcast_assets.qrc
+)
+target_link_libraries(ScompetitionClient PRIVATE Qt${QT_VERSION_MAJOR}::Widgets
+Qt${QT_VERSION_MAJOR}::Network)
+
+add_executable(RobotSimulator
+        simulator_main.cpp
+        simulatorwindow.cpp
+        simulatorwindow.h
+        protocol.h
+)
+target_link_libraries(RobotSimulator PRIVATE Qt${QT_VERSION_MAJOR}::Widgets
+Qt${QT_VERSION_MAJOR}::Network)
+
+set_target_properties(ScompetitionClient RobotSimulator PROPERTIES
+    WIN32_EXECUTABLE TRUE
+)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an

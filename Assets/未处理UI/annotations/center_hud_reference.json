@@ -1,0 +1,163 @@
+{
+  "image": "codex-clipboard-b2369f50-6f00-494a-be30-13461a66e321.png",
+  "size": [
+    203,
+    67
+  ],
+  "coordinateConvention": "[x1, y1, x2, y2), origin at top-left; x2/y2 are exclusive",
+  "components": [
+    {
+      "id": "C01",
+      "label": "左侧 N16B 计分板（左侧素材）",
+      "bbox": [
+        10,
+        9,
+        67,
+        56
+      ],
+      "size": [
+        57,
+        47
+      ],
+      "status": "repurpose",
+      "projectUse": "需要/左侧覆盖层",
+      "note": "N16B 的斜面朝向中央；绘制在 N15 前方并压住 N15 左边缘。"
+    },
+    {
+      "id": "C02",
+      "label": "中央 N15 计时底座",
+      "bbox": [
+        61,
+        8,
+        151,
+        66
+      ],
+      "size": [
+        90,
+        58
+      ],
+      "status": "direct",
+      "projectUse": "直接使用/中央计时背景",
+      "note": "N15 位于左右 N16 之间，作为计时器和比赛比分的底座。"
+    },
+    {
+      "id": "C03",
+      "label": "右侧 N16A 计分板（右侧素材）",
+      "bbox": [
+        142,
+        9,
+        196,
+        56
+      ],
+      "size": [
+        54,
+        47
+      ],
+      "status": "repurpose",
+      "projectUse": "需要/右侧覆盖层",
+      "note": "N16A 的斜面朝向中央；绘制在 N15 前方并压住 N15 右边缘。"
+    },
+    {
+      "id": "C04",
+      "label": "回合文字 Round 1/5",
+      "bbox": [
+        70,
+        0,
+        135,
+        11
+      ],
+      "size": [
+        65,
+        11
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": "项目固定为 1v1、60 秒，不显示原 UI 的回合标签。"
+    },
+    {
+      "id": "C05",
+      "label": "左侧比分数字 0",
+      "bbox": [
+        28,
+        23,
+        51,
+        47
+      ],
+      "size": [
+        23,
+        24
+      ],
+      "status": "optional",
+      "projectUse": "可选/左方小局积分",
+      "note": "项目使用动态文字叠加到左侧 N16B。"
+    },
+    {
+      "id": "C06",
+      "label": "中央比赛计时 6:57",
+      "bbox": [
+        75,
+        23,
+        137,
+        49
+      ],
+      "size": [
+        62,
+        26
+      ],
+      "status": "direct",
+      "projectUse": "直接使用/60 秒倒计时",
+      "note": "项目显示 01:00 到 00:00 的实时比赛计时。"
+    },
+    {
+      "id": "C07",
+      "label": "右侧比分数字 0",
+      "bbox": [
+        159,
+        23,
+        183,
+        47
+      ],
+      "size": [
+        24,
+        24
+      ],
+      "status": "optional",
+      "projectUse": "可选/右方小局积分",
+      "note": "项目使用动态文字叠加到右侧 N16A。"
+    },
+    {
+      "id": "C08",
+      "label": "中央底部高亮条",
+      "bbox": [
+        82,
+        51,
+        125,
+        60
+      ],
+      "size": [
+        43,
+        9
+      ],
+      "status": "repurpose",
+      "projectUse": "可选/N15 装饰",
+      "note": "属于 N15 的底部高亮细节，不单独作为业务字段。"
+    },
+    {
+      "id": "C09",
+      "label": "右下黄色装饰图标",
+      "bbox": [
+        167,
+        53,
+        181,
+        67
+      ],
+      "size": [
+        14,
+        14
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": "与比赛状态无关，不放入导播台 HUD。"
+    }
+  ]
+}

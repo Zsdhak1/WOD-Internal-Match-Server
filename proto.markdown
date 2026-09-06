@@ -20,7 +20,7 @@ ESP32-S3 自动连接指定 Wi-Fi；掉线后自动重连。
 
 所有字段为 小端序；帧使用 __attribute__((packed))，不可按编译器默认对齐解析。
 
-3.1 状态帧：10 Hz，10 字节
+3.1 状态帧：10 Hz，基础 10 字节；可选热量扩展为 12 字节
 typedef struct __attribute__((packed)) {
     uint16_t magic;         // 固定 0x5254
     uint8_t  version;       // 当前 1
@@ -32,6 +32,25 @@ typedef struct __attribute__((packed)) {
     uint8_t  shoot_enabled; // 0 = 禁止射击，1 = 允许射击
 } robot_status_frame_t;
 服务器以最后一次状态帧为准；连续超过预期时间未收到状态帧时，应由服务器判定该车离线。
+
+主机端当前同时兼容基础 10 字节状态帧和下面的 12 字节扩展帧。扩展帧在
+`shoot_enabled` 后追加一个小端序 `uint16_t heat`，用于转播台显示机器人热量条：
+
+```c
+typedef struct __attribute__((packed)) {
+    uint16_t magic;
+    uint8_t  version;
+    uint8_t  frame_type;
+    uint8_t  robot_id;
+    uint8_t  team;
+    uint16_t hp;
+    uint8_t  alive;
+    uint8_t  shoot_enabled;
+    uint16_t heat;
+} robot_status_frame_with_heat_t;
+```
+
+旧固件继续发送 10 字节时，服务器将热量显示为未上报；模拟车载端默认发送 12 字节扩展帧。
 
 3.2 异步事件帧：每种业务独立定义
 事件发生时发送一次。每个业务是一种单独的 C 结构体和固定帧长；服务器先检查 magic、version，再根据 frame_type 按对应结构体解析即可。

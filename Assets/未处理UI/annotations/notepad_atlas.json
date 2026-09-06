@@ -1,0 +1,299 @@
+{
+  "image": "sactx-0-512x256-DXT5_BC3-NotepadAtlas-a8efa592.png",
+  "size": [
+    512,
+    256
+  ],
+  "coordinateConvention": "[x1, y1, x2, y2), origin at top-left; x2/y2 are exclusive",
+  "components": [
+    {
+      "id": "N01",
+      "label": "数字徽章 1",
+      "bbox": [
+        58,
+        23,
+        88,
+        63
+      ],
+      "size": [
+        30,
+        40
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": "可作为回合/编号数字，但本项目已用文本显示 1v1 与 60 秒。"
+    },
+    {
+      "id": "N02",
+      "label": "圆形数字徽章 3",
+      "bbox": [
+        6,
+        51,
+        40,
+        91
+      ],
+      "size": [
+        34,
+        40
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": "原页面回合/比分类数字，不是机器人状态必需元素。"
+    },
+    {
+      "id": "N03",
+      "label": "Round-1 标签",
+      "bbox": [
+        243,
+        71,
+        310,
+        87
+      ],
+      "size": [
+        67,
+        16
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": ""
+    },
+    {
+      "id": "N04",
+      "label": "Round-5 标签",
+      "bbox": [
+        59,
+        75,
+        127,
+        91
+      ],
+      "size": [
+        68,
+        16
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": ""
+    },
+    {
+      "id": "N05",
+      "label": "Round-4 标签",
+      "bbox": [
+        151,
+        75,
+        219,
+        91
+      ],
+      "size": [
+        68,
+        16
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": ""
+    },
+    {
+      "id": "N06",
+      "label": "Round-3 标签",
+      "bbox": [
+        263,
+        99,
+        331,
+        115
+      ],
+      "size": [
+        68,
+        16
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": ""
+    },
+    {
+      "id": "N07",
+      "label": "Round-2 标签",
+      "bbox": [
+        263,
+        127,
+        331,
+        143
+      ],
+      "size": [
+        68,
+        16
+      ],
+      "status": "unused",
+      "projectUse": "不使用",
+      "note": ""
+    },
+    {
+      "id": "N08",
+      "label": "比分数字 2",
+      "bbox": [
+        5,
+        103,
+        41,
+        144
+      ],
+      "size": [
+        36,
+        41
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": "可作为比分数字贴图；当前项目比分仍建议使用可缩放文字。"
+    },
+    {
+      "id": "N09",
+      "label": "比分数字 0",
+      "bbox": [
+        56,
+        103,
+        92,
+        143
+      ],
+      "size": [
+        36,
+        40
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": ""
+    },
+    {
+      "id": "N10",
+      "label": "比分数字 3",
+      "bbox": [
+        107,
+        103,
+        143,
+        143
+      ],
+      "size": [
+        36,
+        40
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": ""
+    },
+    {
+      "id": "N11",
+      "label": "比分数字 2",
+      "bbox": [
+        159,
+        103,
+        193,
+        144
+      ],
+      "size": [
+        34,
+        41
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": ""
+    },
+    {
+      "id": "N12",
+      "label": "比分数字 0",
+      "bbox": [
+        209,
+        103,
+        245,
+        143
+      ],
+      "size": [
+        36,
+        40
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": ""
+    },
+    {
+      "id": "N13",
+      "label": "比分数字 7",
+      "bbox": [
+        353,
+        104,
+        382,
+        142
+      ],
+      "size": [
+        29,
+        38
+      ],
+      "status": "optional",
+      "projectUse": "可选",
+      "note": ""
+    },
+    {
+      "id": "N14",
+      "label": "顶部水平边框条",
+      "bbox": [
+        6,
+        143,
+        406,
+        151
+      ],
+      "size": [
+        400,
+        8
+      ],
+      "status": "optional",
+      "projectUse": "可选/改作",
+      "note": "可以改作队名或计时器的装饰边框。"
+    },
+    {
+      "id": "N15",
+      "label": "中心底座/面板背景",
+      "bbox": [
+        7,
+        156,
+        407,
+        250
+      ],
+      "size": [
+        400,
+        94
+      ],
+      "status": "optional",
+      "projectUse": "可选/改作",
+      "note": "可以改作中央比赛标题、计时器或比分面板背景。"
+    },
+    {
+      "id": "N16A",
+      "label": "小局积分背景（右侧素材）",
+      "bbox": [
+        421,
+        133,
+        503,
+        194
+      ],
+      "size": [
+        82,
+        61
+      ],
+      "status": "direct",
+      "projectUse": "直接使用/右侧蓝方小局积分",
+      "note": "图集上方的 N16A 作为右侧素材，斜面朝向中央；叠加当前蓝方小局积分并绘制在 N15 前方。"
+    },
+    {
+      "id": "N16B",
+      "label": "小局积分背景（左侧素材）",
+      "bbox": [
+        421,
+        194,
+        503,
+        256
+      ],
+      "size": [
+        82,
+        62
+      ],
+      "status": "direct",
+      "projectUse": "直接使用/左侧红方小局积分",
+      "note": "图集下方的 N16B 作为左侧素材，斜面朝向中央；叠加当前红方小局积分并绘制在 N15 前方。"
+    }
+  ]
+}

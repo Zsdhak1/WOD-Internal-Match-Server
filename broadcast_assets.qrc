@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/broadcast">
+        <file alias="notepad_atlas.png">Assets/未处理UI/sactx-0-512x256-DXT5_BC3-NotepadAtlas-a8efa592.png</file>
+        <file alias="statusbar_atlas.png">Assets/未处理UI/sactx-0-2048x1024-DXT5_BC3-StatusbarAtlas-be4c2c94.png</file>
+    </qresource>
+</RCC>

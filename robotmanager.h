@@ -21,6 +21,7 @@ public:
         quint8    robotId = 0;
         quint8    team = 0;
         int       hp = -1;           // -1 表示尚未收到血量信息
+        int       heat = -1;         // -1 表示当前固件尚未上报热量
         bool      alive = true;
         bool      shootEnabled = true;
         bool      online = false;
