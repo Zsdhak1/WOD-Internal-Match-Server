@@ -107,19 +107,31 @@ JSON 支持 `red` / `blue` 或 `redName` / `blueName` 字段：
 4. 启动 `ScompetitionClient.exe`，选择红方或蓝方，选择视频设备并完成登记。
 5. 在控制台打开转播画面，选择输出屏幕和当前导播视角。
 
-选手端会枚举 Windows 摄像头设备，并为选择的设备生成稳定的视频源标识。当前 TCP 协议负责登记和同步比赛元数据；网络视频中继模块可以通过 `BroadcastWindow::setSourceFrame()` 向转播窗口提供实时帧。
+选手端会枚举 Windows 摄像头设备，并为选择的设备生成稳定的视频源标识。登记成功后，客户端使用 FFmpeg 将摄像头编码为 H.264，并通过 MPEG-TS/UDP 发送到服务端。服务端按红蓝方独立接收、解码，再通过 `BroadcastWindow::setSourceFrame()` 更新转播画面。
 
-当 `ffmpeg` 位于系统 `PATH`、程序目录或 `tools/ffmpeg.exe` 时，选手端还可以使用 DirectShow 摄像头进行本地 MJPEG 预览。
+客户端和服务端都会优先使用程序目录中的 `tools/ffmpeg/ffmpeg.exe`，因此正式发布包不依赖系统安装 FFmpeg。程序目录或系统 `PATH` 中的 FFmpeg 仍作为开发环境兼容路径。客户端推流参数为 1280×720、30 FPS、H.264 `ultrafast/zerolatency`，服务端输出 960×540 BGRA 帧供 Qt 显示。
 
 ## 网络协议
 
 - 机器人到服务端：UDP `5005`
 - 选手端到服务端：TCP `5010`
+- 红方视频：服务端 TCP 端口 + `1`，默认 UDP `5011`
+- 蓝方视频：服务端 TCP 端口 + `2`，默认 UDP `5012`
 - 机器人身份：`team + robotId`
 - 机器人状态帧：兼容基础 10 字节状态帧和带热量的 12 字节扩展状态帧
 - 比赛事件：死亡、复活、受击、攻击、允许射击和禁止射击使用独立事件帧
 
 协议实现见 [protocol.h](protocol.h)、[matchprotocol.h](matchprotocol.h)，详细说明见 [proto.markdown](proto.markdown)。
+
+## Windows 正式发布
+
+项目的 Windows 发布内容包括 `Scompetition.exe`、`ScompetitionClient.exe`、`RobotSimulator.exe`，以及 `tools/ffmpeg/ffmpeg.exe`、`tools/ffmpeg/ffprobe.exe` 和许可证文件。配置并构建后执行以下命令生成安装目录：
+
+```powershell
+cmake --install build/msvc2022_64-Debug --config Debug --prefix dist
+```
+
+也可以使用 CPack 生成 Windows 安装包。发布目录中的 FFmpeg 文件必须与可执行文件一同分发，不能只复制三个 Qt 程序。
 
 ## 编译
 

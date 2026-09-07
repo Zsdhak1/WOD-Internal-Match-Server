@@ -8,6 +8,11 @@ out/
 *.exe
 *.dll
 
+# FFmpeg is distributed with the Windows release.
+!tools/ffmpeg/
+!tools/ffmpeg/*.exe
+!tools/ffmpeg/*.txt
+
 # Qt Creator local configuration
 .qtcreator/
 *.user
@@ -19,4 +24,3 @@ out/
 .vscode/
 .claude/
 .learnings/
-

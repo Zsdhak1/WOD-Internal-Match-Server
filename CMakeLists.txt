@@ -96,11 +96,54 @@ set_target_properties(Scompetition PROPERTIES
 )
 
 include(GNUInstallDirs)
-install(TARGETS Scompetition
+install(TARGETS Scompetition ScompetitionClient RobotSimulator
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+if(WIN32)
+    set(FFMPEG_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
+
+    # Keep the encoder beside each development executable as well as in the
+    # install tree, so local runs exercise the same runtime dependency.
+    foreach(target Scompetition ScompetitionClient RobotSimulator)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${FFMPEG_RUNTIME_DIR}/ffmpeg.exe"
+                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/ffmpeg.exe"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${FFMPEG_RUNTIME_DIR}/ffprobe.exe"
+                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/ffprobe.exe"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${FFMPEG_RUNTIME_DIR}/LICENSE.txt"
+                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/LICENSE.txt"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${FFMPEG_RUNTIME_DIR}/README.txt"
+                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/README.txt"
+            VERBATIM
+        )
+    endforeach()
+
+    install(DIRECTORY "${FFMPEG_RUNTIME_DIR}/"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}/tools/ffmpeg"
+        FILES_MATCHING
+            PATTERN "ffmpeg.exe"
+            PATTERN "ffprobe.exe"
+            PATTERN "LICENSE.txt"
+            PATTERN "README.txt"
+    )
+endif()
+
+set(CPACK_PACKAGE_NAME "WOD-Internal-Match-Server")
+set(CPACK_PACKAGE_VENDOR "WOD Internal Match")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "局域网赛事服务端、选手端和转播系统")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "WOD-Internal-Match-Server")
+# A portable ZIP is available without requiring NSIS on the build machine.
+set(CPACK_GENERATOR "ZIP")
+include(CPack)
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(Scompetition)

@@ -16,6 +16,7 @@ class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QTcpSocket;
+class QTimer;
 class QToolButton;
 class QWidget;
 
@@ -37,6 +38,7 @@ private slots:
     void onSocketReadyRead();
     void onSocketDisconnected();
     void onSocketError();
+    void onLoginTimeout();
     void onLogoutClicked();
     void onRefreshVideoDevices();
     void onPreviewVideo();
@@ -66,6 +68,7 @@ private:
     void setVideoStatus(const QString &message, const QColor &color = QColor());
     void startVideoPreview();
     void stopVideoPreview();
+    void scheduleVideoRestart();
     void consumeVideoOutput();
     void showFramePreview(const QImage &frame);
     QString ffmpegExecutable() const;
@@ -76,17 +79,21 @@ private:
     QVector<RobotManager::RobotInfo> robotInfosFromSnapshot(const QJsonObject &message) const;
 
     QTcpSocket *m_socket = nullptr;
+    QTimer *m_loginTimeoutTimer = nullptr;
+    QTimer *m_videoRestartTimer = nullptr;
     QProcess *m_videoProcess = nullptr;
     QByteArray m_readBuffer;
     QByteArray m_videoBuffer;
     QImage m_lastVideoFrame;
     QVector<QPair<QString, QString>> m_videoDevices;
     bool m_registered = false;
+    bool m_loginInProgress = false;
     int m_selectedTeam = 0;
     int m_selectedRobotId = 1;
     QString m_displayName;
     QString m_activeSourceId;
     QString m_activeSourceName;
+    quint16 m_videoPort = 0;
 
     QWidget *m_registrationOverlay = nullptr;
     QWidget *m_controlLayer = nullptr;

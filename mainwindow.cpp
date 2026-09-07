@@ -29,6 +29,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScreen>
+#include <QShortcut>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -40,6 +41,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 constexpr int kExpectedRobots = 2;
@@ -121,12 +123,40 @@ MainWindow::MainWindow(QWidget *parent)
     m_robots = new RobotManager(this);
     connect(m_robots, &RobotManager::robotsChanged, this, &MainWindow::refreshTable);
     connect(m_robots, &RobotManager::logMessage, this, &MainWindow::onLogMessage);
+    connect(m_robots, &RobotManager::combatEvent, this,
+            [this](quint8 team, quint8 robotId, quint8 type) {
+        if (!m_programModeEdit || !m_programModeEdit->currentData().toBool()
+            || !m_programSourceEdit
+            || (type != proto::TypeHit && type != proto::TypeAttack
+                && type != proto::TypeDeath)) {
+            return;
+        }
+
+        for (const auto &source : std::as_const(m_videoSources)) {
+            if (!source.online || source.team != team
+                || (source.robotId != 0 && source.robotId != robotId)) {
+                continue;
+            }
+            const int index = m_programSourceEdit->findData(source.sourceId);
+            if (index >= 0) {
+                m_programSourceEdit->setCurrentIndex(index);
+                if (m_autoSwitchTimer && m_autoSwitchIntervalEdit)
+                    m_autoSwitchTimer->start(m_autoSwitchIntervalEdit->value() * 1000);
+            }
+            break;
+        }
+    });
 
     m_broadcast = new BroadcastWindow;
     m_matchServer = new MatchServer(this);
     connect(m_matchServer, &MatchServer::logMessage, this, &MainWindow::onLogMessage);
     connect(m_matchServer, &MatchServer::videoSourcesChanged, this,
             &MainWindow::onVideoSourcesChanged);
+    connect(m_matchServer, &MatchServer::videoFrameReceived, this,
+            [this](const QString &sourceId, const QImage &frame) {
+        if (m_broadcast)
+            m_broadcast->setSourceFrame(sourceId, frame);
+    });
     connect(m_matchServer, &MatchServer::serverStateChanged, this,
             [this](bool listening, const QString &message) {
                 if (m_clientStateLabel)
@@ -160,12 +190,29 @@ MainWindow::MainWindow(QWidget *parent)
     publishMatchState();
     updateProgramSourceList();
     refreshTable();
+
+    for (int sourceNumber = 1; sourceNumber <= 5; ++sourceNumber) {
+        auto *shortcut = new QShortcut(
+            QKeySequence(QStringLiteral("Ctrl+%1").arg(sourceNumber)), this);
+        shortcut->setContext(Qt::ApplicationShortcut);
+        connect(shortcut, &QShortcut::activated, this, [this, sourceNumber] {
+            if (m_programSourceEdit && sourceNumber <= m_programSourceEdit->count())
+                m_programSourceEdit->setCurrentIndex(sourceNumber - 1);
+        });
+    }
 }
 
 MainWindow::~MainWindow()
 {
+    if (m_autoSwitchTimer)
+        m_autoSwitchTimer->stop();
+    if (m_matchServer)
+        m_matchServer->stop();
+    if (m_socket)
+        m_socket->close();
+
     if (m_broadcast) {
-        m_broadcast->close();
+        m_broadcast->hide();
         delete m_broadcast;
         m_broadcast = nullptr;
     }

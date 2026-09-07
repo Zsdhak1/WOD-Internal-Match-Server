@@ -29,6 +29,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QDir>
@@ -81,6 +82,20 @@ ClientWindow::ClientWindow(QWidget *parent)
     connect(m_socket, &QTcpSocket::readyRead, this, &ClientWindow::onSocketReadyRead);
     connect(m_socket, &QTcpSocket::disconnected, this, &ClientWindow::onSocketDisconnected);
     connect(m_socket, &QTcpSocket::errorOccurred, this, &ClientWindow::onSocketError);
+
+    m_loginTimeoutTimer = new QTimer(this);
+    m_loginTimeoutTimer->setSingleShot(true);
+    m_loginTimeoutTimer->setInterval(3000);
+    connect(m_loginTimeoutTimer, &QTimer::timeout,
+            this, &ClientWindow::onLoginTimeout);
+
+    m_videoRestartTimer = new QTimer(this);
+    m_videoRestartTimer->setSingleShot(true);
+    m_videoRestartTimer->setInterval(2000);
+    connect(m_videoRestartTimer, &QTimer::timeout, this, [this] {
+        if (m_registered && !m_activeSourceId.isEmpty())
+            startVideoPreview();
+    });
 
     buildUi();
     refreshVideoDevices();
@@ -329,6 +344,10 @@ void ClientWindow::buildControlLayer()
 
 void ClientWindow::showLoginPage()
 {
+    m_loginInProgress = false;
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->stop();
+
     const QString previousSourceId = m_activeSourceId;
     m_registered = false;
     m_selectedTeam = 0;
@@ -336,6 +355,7 @@ void ClientWindow::showLoginPage()
     m_displayName.clear();
     m_activeSourceId.clear();
     m_activeSourceName.clear();
+    m_videoPort = 0;
     m_videoBuffer.clear();
     if (!previousSourceId.isEmpty())
         setSourceFrame(previousSourceId, QImage());
@@ -435,17 +455,29 @@ void ClientWindow::onLoginClicked()
         m_displayName = teamText(team) + tr("选手端");
 
     m_readBuffer.clear();
+    m_loginInProgress = true;
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->stop();
     if (m_loginButton)
         m_loginButton->setEnabled(false);
     if (m_loginStatus)
         m_loginStatus->setText(tr("正在连接 %1:%2 ...").arg(server).arg(port));
-    if (m_socket->state() != QAbstractSocket::UnconnectedState)
+    if (m_socket->state() != QAbstractSocket::UnconnectedState) {
+        const QSignalBlocker blocker(m_socket);
         m_socket->abort();
+    }
     m_socket->connectToHost(server, port);
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->start();
 }
 
 void ClientWindow::onSocketConnected()
 {
+    if (!m_loginInProgress || m_registered)
+        return;
+
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->start();
     if (m_loginStatus)
         m_loginStatus->setText(tr("TCP 已连接，正在登记 %1 ...").arg(teamText(m_selectedTeam)));
 
@@ -482,6 +514,18 @@ void ClientWindow::onSocketReadyRead()
 
 void ClientWindow::onSocketDisconnected()
 {
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->stop();
+
+    if (m_loginInProgress) {
+        m_loginInProgress = false;
+        if (m_loginButton)
+            m_loginButton->setEnabled(true);
+        if (m_loginStatus)
+            m_loginStatus->setText(tr("连接已断开，请确认赛事服务器已启动。"));
+        return;
+    }
+
     const bool wasRegistered = m_registered;
     m_registered = false;
     if (wasRegistered)
@@ -502,6 +546,21 @@ void ClientWindow::onSocketError()
         return;
 
     const QString error = m_socket->errorString();
+    if (m_loginInProgress) {
+        m_loginInProgress = false;
+        if (m_loginTimeoutTimer)
+            m_loginTimeoutTimer->stop();
+        if (m_socket->state() != QAbstractSocket::UnconnectedState) {
+            const QSignalBlocker blocker(m_socket);
+            m_socket->abort();
+        }
+        if (m_loginStatus)
+            m_loginStatus->setText(tr("连接失败：%1").arg(error));
+        if (m_loginButton)
+            m_loginButton->setEnabled(true);
+        return;
+    }
+
     if (m_registrationOverlay && m_registrationOverlay->isVisible()) {
         if (m_loginStatus)
             m_loginStatus->setText(tr("连接失败：%1").arg(error));
@@ -513,8 +572,27 @@ void ClientWindow::onSocketError()
     }
 }
 
+void ClientWindow::onLoginTimeout()
+{
+    if (!m_loginInProgress)
+        return;
+
+    m_loginInProgress = false;
+    if (m_socket && m_socket->state() != QAbstractSocket::UnconnectedState) {
+        const QSignalBlocker blocker(m_socket);
+        m_socket->abort();
+    }
+    if (m_loginButton)
+        m_loginButton->setEnabled(true);
+    if (m_loginStatus)
+        m_loginStatus->setText(tr("连接超时，请确认赛事服务器地址和端口。"));
+}
+
 void ClientWindow::onLogoutClicked()
 {
+    m_loginInProgress = false;
+    if (m_loginTimeoutTimer)
+        m_loginTimeoutTimer->stop();
     if (m_registered)
         sendMessage(matchproto::simpleRequest(QStringLiteral("logout")));
     m_registered = false;
@@ -533,7 +611,12 @@ void ClientWindow::handleMessage(const QJsonObject &message)
 {
     const QString type = message.value(QStringLiteral("type")).toString();
     if (type == QStringLiteral("registration_result")) {
+        if (!m_loginInProgress)
+            return;
         if (!message.value(QStringLiteral("ok")).toBool()) {
+            m_loginInProgress = false;
+            if (m_loginTimeoutTimer)
+                m_loginTimeoutTimer->stop();
             if (m_loginStatus)
                 m_loginStatus->setText(message.value(QStringLiteral("message"))
                                             .toString(tr("登记失败")));
@@ -549,8 +632,13 @@ void ClientWindow::handleMessage(const QJsonObject &message)
         const int team = message.value(QStringLiteral("team")).toInt(m_selectedTeam);
         const int robotId = message.value(QStringLiteral("robotId"))
                                 .toInt(kDefaultRobotId);
+        m_loginInProgress = false;
+        if (m_loginTimeoutTimer)
+            m_loginTimeoutTimer->stop();
         m_activeSourceId = message.value(QStringLiteral("sourceId")).toString().trimmed();
         m_activeSourceName = message.value(QStringLiteral("sourceName")).toString().trimmed();
+        m_videoPort = static_cast<quint16>(
+            qBound(0, message.value(QStringLiteral("videoPort")).toInt(), 65535));
 
         if (m_videoDeviceEdit) {
             const QSignalBlocker blocker(m_videoDeviceEdit);
@@ -579,6 +667,9 @@ void ClientWindow::handleMessage(const QJsonObject &message)
         return;
     }
 
+    if (!m_registered)
+        return;
+
     if (type == QStringLiteral("robot_snapshot")) {
         handleRobotSnapshot(message);
     } else if (type == QStringLiteral("match_state")) {
@@ -592,6 +683,8 @@ void ClientWindow::handleMessage(const QJsonObject &message)
         }
         m_activeSourceId = message.value(QStringLiteral("sourceId")).toString().trimmed();
         m_activeSourceName = message.value(QStringLiteral("sourceName")).toString().trimmed();
+        m_videoPort = static_cast<quint16>(
+            qBound(0, message.value(QStringLiteral("videoPort")).toInt(m_videoPort), 65535));
         updateActiveRobotSource();
         setVideoStatus(message.value(QStringLiteral("message"))
                            .toString(tr("视频源登记成功")),
@@ -822,6 +915,9 @@ void ClientWindow::setVideoStatus(const QString &message, const QColor &color)
 
 void ClientWindow::startVideoPreview()
 {
+    if (m_videoRestartTimer)
+        m_videoRestartTimer->stop();
+
     QComboBox *combo = m_registered ? m_videoDeviceEdit : m_registrationSourceEdit;
     const QString sourceId = selectedSourceId(combo);
     const QString sourceName = selectedSourceName(combo);
@@ -856,44 +952,89 @@ void ClientWindow::startVideoPreview()
             [this, process](QProcess::ProcessError) {
         if (m_videoProcess != process)
             return;
-        setVideoStatus(tr("视频预览启动失败：%1").arg(process->errorString()),
+        setVideoStatus(tr("视频采集启动失败：%1").arg(process->errorString()),
                        QColor(QStringLiteral("#ff6872")));
+        scheduleVideoRestart();
     });
     connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [this, process](int, QProcess::ExitStatus) {
         if (m_videoProcess != process)
             return;
-        if (m_videoBuffer.isEmpty())
-            setVideoStatus(tr("视频预览已停止，请检查摄像头是否被其他程序占用。"),
-                           QColor(QStringLiteral("#f0aa36")));
+        m_videoProcess = nullptr;
+        process->deleteLater();
+        setVideoStatus(tr("视频采集已停止，正在尝试恢复。"),
+                       QColor(QStringLiteral("#f0aa36")));
+        scheduleVideoRestart();
     });
 
-    process->start(executable, {
+    QStringList arguments = {
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("error"),
         QStringLiteral("-f"), QStringLiteral("dshow"),
+        QStringLiteral("-thread_queue_size"), QStringLiteral("512"),
         QStringLiteral("-framerate"), QStringLiteral("30"),
         QStringLiteral("-video_size"), QStringLiteral("1280x720"),
         QStringLiteral("-i"), QStringLiteral("video=%1").arg(sourceName),
-        QStringLiteral("-an"),
-        QStringLiteral("-f"), QStringLiteral("mjpeg"),
-        QStringLiteral("-q:v"), QStringLiteral("5"),
-        QStringLiteral("pipe:1")
-    });
+        QStringLiteral("-an")
+    };
+
+    const bool streamToServer = m_registered && m_videoPort > 0 && m_serverEdit;
+    if (streamToServer) {
+        QString server = m_serverEdit->text().trimmed();
+        if (server.contains(QLatin1Char(':')) && !server.startsWith(QLatin1Char('[')))
+            server = QStringLiteral("[%1]").arg(server);
+        const QString udpUrl = QStringLiteral(
+            "udp://%1:%2?pkt_size=1316&buffer_size=65536&connect=1")
+                                   .arg(server)
+                                   .arg(m_videoPort);
+        arguments << QStringLiteral("-filter_complex")
+                  << QStringLiteral("[0:v:0]split=2[vnet][vpreview]")
+                  << QStringLiteral("-map") << QStringLiteral("[vnet]")
+                  << QStringLiteral("-c:v") << QStringLiteral("libx264")
+                  << QStringLiteral("-preset") << QStringLiteral("ultrafast")
+                  << QStringLiteral("-tune") << QStringLiteral("zerolatency")
+                  << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
+                  << QStringLiteral("-b:v") << QStringLiteral("3500k")
+                  << QStringLiteral("-maxrate") << QStringLiteral("3500k")
+                  << QStringLiteral("-bufsize") << QStringLiteral("7000k")
+                  << QStringLiteral("-g") << QStringLiteral("30")
+                  << QStringLiteral("-keyint_min") << QStringLiteral("30")
+                  << QStringLiteral("-sc_threshold") << QStringLiteral("0")
+                  << QStringLiteral("-bf") << QStringLiteral("0")
+                  << QStringLiteral("-flush_packets") << QStringLiteral("1")
+                  << QStringLiteral("-f") << QStringLiteral("mpegts")
+                  << udpUrl
+                  << QStringLiteral("-map") << QStringLiteral("[vpreview]")
+                  << QStringLiteral("-c:v") << QStringLiteral("mjpeg")
+                  << QStringLiteral("-q:v") << QStringLiteral("5")
+                  << QStringLiteral("-f") << QStringLiteral("mjpeg")
+                  << QStringLiteral("pipe:1");
+    } else {
+        arguments << QStringLiteral("-f") << QStringLiteral("mjpeg")
+                  << QStringLiteral("-q:v") << QStringLiteral("5")
+                  << QStringLiteral("pipe:1");
+    }
+
+    process->start(executable, arguments);
 
     if (!process->waitForStarted(800)) {
         setVideoStatus(tr("无法启动 ffmpeg：%1").arg(process->errorString()),
                        QColor(QStringLiteral("#ff6872")));
         stopVideoPreview();
+        scheduleVideoRestart();
         return;
     }
 
-    setVideoStatus(tr("正在预览：%1").arg(sourceName),
+    setVideoStatus(streamToServer
+                       ? tr("H.264 推流中：%1 · UDP %2").arg(sourceName).arg(m_videoPort)
+                       : tr("正在预览：%1").arg(sourceName),
                    QColor(QStringLiteral("#72d39a")));
 }
 
 void ClientWindow::stopVideoPreview()
 {
+    if (m_videoRestartTimer)
+        m_videoRestartTimer->stop();
     if (!m_videoProcess)
         return;
 
@@ -905,6 +1046,14 @@ void ClientWindow::stopVideoPreview()
         process->waitForFinished(300);
     }
     process->deleteLater();
+}
+
+void ClientWindow::scheduleVideoRestart()
+{
+    if (m_registered && !m_activeSourceId.isEmpty() && m_videoRestartTimer
+        && !m_videoRestartTimer->isActive()) {
+        m_videoRestartTimer->start();
+    }
 }
 
 void ClientWindow::consumeVideoOutput()
@@ -990,9 +1139,14 @@ QString ClientWindow::ffmpegExecutable() const
         return bundled;
 
     const QString adjacent = QDir(QCoreApplication::applicationDirPath())
-                                 .filePath(QStringLiteral("tools/ffmpeg.exe"));
+                                  .filePath(QStringLiteral("tools/ffmpeg.exe"));
     if (QFileInfo::exists(adjacent))
         return adjacent;
+
+    const QString packaged = QDir(QCoreApplication::applicationDirPath())
+                                  .filePath(QStringLiteral("tools/ffmpeg/ffmpeg.exe"));
+    if (QFileInfo::exists(packaged))
+        return packaged;
 
     return QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
 }

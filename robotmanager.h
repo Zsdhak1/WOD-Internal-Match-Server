@@ -41,6 +41,7 @@ signals:
     // 任一台车状态有实质变化(含上线/离线切换)时发出，UI 据此刷新。
     void robotsChanged();
     void logMessage(const QString &message);
+    void combatEvent(quint8 team, quint8 robotId, quint8 type);
 
 private slots:
     void checkOffline();

@@ -2,17 +2,30 @@
 
 #include "matchprotocol.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <QNetworkDatagram>
 #include <QJsonArray>
+#include <QProcess>
 #include <QRandomGenerator>
+#include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUdpSocket>
 #include <QUuid>
 
 #include <algorithm>
+#include <utility>
 
 namespace {
 constexpr quint8 kDefaultRobotId = 1;
+constexpr quint8 kRedTeam = 1;
+constexpr quint8 kBlueTeam = 2;
+constexpr int kVideoWidth = 960;
+constexpr int kVideoHeight = 540;
+constexpr int kVideoBytesPerFrame = kVideoWidth * kVideoHeight * 4;
 
 QString teamName(quint8 team)
 {
@@ -26,6 +39,22 @@ QString socketTag(QTcpSocket *socket)
     if (!socket)
         return QStringLiteral("<unknown>");
     return QStringLiteral("%1:%2").arg(socket->peerAddress().toString()).arg(socket->peerPort());
+}
+
+QString ffmpegExecutable()
+{
+    const QDir applicationDir(QCoreApplication::applicationDirPath());
+    const QStringList candidates = {
+        applicationDir.filePath(QStringLiteral("ffmpeg.exe")),
+        applicationDir.filePath(QStringLiteral("tools/ffmpeg/ffmpeg.exe")),
+        applicationDir.filePath(QStringLiteral("tools/ffmpeg.exe")),
+        QStandardPaths::findExecutable(QStringLiteral("ffmpeg"))
+    };
+    for (const QString &candidate : candidates) {
+        if (!candidate.isEmpty() && QFileInfo::exists(candidate))
+            return candidate;
+    }
+    return QString();
 }
 } // namespace
 
@@ -62,6 +91,14 @@ bool MatchServer::start(quint16 port)
     }
 
     m_port = m_server->serverPort();
+    if (!startVideoSockets()) {
+        m_server->close();
+        m_port = 0;
+        const QString message = tr("视频 UDP 端口启动失败，选手端服务未启动");
+        emit serverStateChanged(false, message);
+        emit logMessage(QStringLiteral("[选手端] %1").arg(message));
+        return false;
+    }
     const QString message = tr("选手端 TCP 登记服务已启动，端口 %1").arg(m_port);
     emit serverStateChanged(true, message);
     emit logMessage(QStringLiteral("[选手端] %1").arg(message));
@@ -70,7 +107,7 @@ bool MatchServer::start(quint16 port)
 
 void MatchServer::stop()
 {
-    if (!m_server->isListening() && m_sessions.isEmpty())
+    if (!m_server->isListening() && m_sessions.isEmpty() && m_videoSockets.isEmpty())
         return;
 
     const auto sockets = m_sessions.keys();
@@ -81,11 +118,173 @@ void MatchServer::stop()
     m_sessions.clear();
     m_teamSessions.clear();
     m_server->close();
+    stopVideoSockets();
     m_port = 0;
     emitVideoSources();
     emit clientCountChanged(0);
     emit serverStateChanged(false, tr("选手端 TCP 登记服务已停止"));
     emit logMessage(QStringLiteral("[选手端] 登记服务已停止"));
+}
+
+quint16 MatchServer::videoPort(quint8 team) const
+{
+    if (team != kRedTeam && team != kBlueTeam)
+        return 0;
+    if (m_port > 65533)
+        return 0;
+    return static_cast<quint16>(m_port + team);
+}
+
+bool MatchServer::startVideoSockets()
+{
+    if (m_port > 65533)
+        return false;
+
+    for (const quint8 team : {kRedTeam, kBlueTeam}) {
+        auto *socket = new QUdpSocket(this);
+        const quint16 port = videoPort(team);
+        if (!socket->bind(QHostAddress::AnyIPv4, port,
+                          QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint)) {
+            emit logMessage(tr("视频 UDP 端口 %1 启动失败: %2")
+                                .arg(port)
+                                .arg(socket->errorString()));
+            socket->deleteLater();
+            stopVideoSockets();
+            return false;
+        }
+        m_videoSockets.insert(team, socket);
+        connect(socket, &QUdpSocket::readyRead, this, [this, team] {
+            onVideoReadyRead(team);
+        });
+    }
+    return true;
+}
+
+void MatchServer::stopVideoSockets()
+{
+    stopVideoDecoder(kRedTeam);
+    stopVideoDecoder(kBlueTeam);
+    for (auto *socket : std::as_const(m_videoSockets)) {
+        if (socket)
+            socket->close();
+        if (socket)
+            socket->deleteLater();
+    }
+    m_videoSockets.clear();
+    m_videoBuffers.clear();
+}
+
+void MatchServer::onVideoReadyRead(quint8 team)
+{
+    QUdpSocket *socket = m_videoSockets.value(team);
+    if (!socket)
+        return;
+
+    QProcess *decoder = m_videoDecoders.value(team);
+    while (socket->hasPendingDatagrams()) {
+        const QNetworkDatagram datagram = socket->receiveDatagram();
+        if (datagram.data().isEmpty())
+            continue;
+        if (!decoder) {
+            startVideoDecoder(team);
+            decoder = m_videoDecoders.value(team);
+        }
+        if (decoder && decoder->state() != QProcess::NotRunning
+            && decoder->bytesToWrite() < 2 * 1024 * 1024) {
+            decoder->write(datagram.data());
+        }
+    }
+}
+
+void MatchServer::startVideoDecoder(quint8 team)
+{
+    if (m_videoDecoders.contains(team))
+        return;
+
+    const QString executable = ffmpegExecutable();
+    if (executable.isEmpty()) {
+        emit logMessage(tr("未找到 FFmpeg，无法解码 %1 方视频流").arg(team == kRedTeam ? tr("红") : tr("蓝")));
+        return;
+    }
+
+    auto *decoder = new QProcess(this);
+    decoder->setProcessChannelMode(QProcess::SeparateChannels);
+    m_videoDecoders.insert(team, decoder);
+    connect(decoder, &QProcess::readyReadStandardOutput, this, [this, team] {
+        consumeVideoOutput(team);
+    });
+    connect(decoder, &QProcess::errorOccurred, this, [this, team, decoder](QProcess::ProcessError) {
+        if (m_videoDecoders.value(team) == decoder) {
+            emit logMessage(tr("%1 方视频解码器错误: %2")
+                                .arg(team == kRedTeam ? tr("红") : tr("蓝"))
+                                .arg(decoder->errorString()));
+            if (decoder->error() == QProcess::FailedToStart) {
+                m_videoDecoders.remove(team);
+                m_videoBuffers.remove(team);
+                decoder->deleteLater();
+            }
+        }
+    });
+    connect(decoder, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, team, decoder](int, QProcess::ExitStatus) {
+        if (m_videoDecoders.value(team) != decoder)
+            return;
+        emit logMessage(tr("%1 方视频解码器已停止").arg(team == kRedTeam ? tr("红") : tr("蓝")));
+        m_videoDecoders.remove(team);
+        m_videoBuffers.remove(team);
+        decoder->deleteLater();
+    });
+
+    decoder->start(executable, {
+        QStringLiteral("-hide_banner"),
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-fflags"), QStringLiteral("nobuffer"),
+        QStringLiteral("-flags"), QStringLiteral("low_delay"),
+        QStringLiteral("-f"), QStringLiteral("mpegts"),
+        QStringLiteral("-i"), QStringLiteral("pipe:0"),
+        QStringLiteral("-an"),
+        QStringLiteral("-f"), QStringLiteral("rawvideo"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
+        QStringLiteral("-s"), QStringLiteral("%1x%2").arg(kVideoWidth).arg(kVideoHeight),
+        QStringLiteral("-r"), QStringLiteral("30"),
+        QStringLiteral("pipe:1")
+    });
+}
+
+void MatchServer::stopVideoDecoder(quint8 team)
+{
+    QProcess *decoder = m_videoDecoders.take(team);
+    if (!decoder)
+        return;
+    decoder->closeWriteChannel();
+    if (decoder->state() != QProcess::NotRunning) {
+        decoder->kill();
+        decoder->waitForFinished(300);
+    }
+    decoder->deleteLater();
+}
+
+void MatchServer::consumeVideoOutput(quint8 team)
+{
+    QProcess *decoder = m_videoDecoders.value(team);
+    if (!decoder)
+        return;
+
+    QByteArray &buffer = m_videoBuffers[team];
+    buffer.append(decoder->readAllStandardOutput());
+    while (buffer.size() >= kVideoBytesPerFrame) {
+        const QByteArray frameBytes = buffer.left(kVideoBytesPerFrame);
+        buffer.remove(0, kVideoBytesPerFrame);
+        const QImage frame(reinterpret_cast<const uchar *>(frameBytes.constData()),
+                           kVideoWidth, kVideoHeight, QImage::Format_ARGB32);
+        QString sourceId;
+        QTcpSocket *sessionSocket = m_teamSessions.value(team);
+        const auto session = m_sessions.constFind(sessionSocket);
+        if (session != m_sessions.constEnd())
+            sourceId = session->sourceId;
+        if (!sourceId.isEmpty())
+            emit videoFrameReceived(sourceId, frame.copy());
+    }
 }
 
 bool MatchServer::isListening() const
@@ -225,7 +424,8 @@ void MatchServer::processMessage(QTcpSocket *socket, const QJsonObject &message)
             {QStringLiteral("teamName"), teamName(sessionIt->team)},
             {QStringLiteral("robotId"), sessionIt->robotId},
             {QStringLiteral("sourceId"), sessionIt->sourceId},
-            {QStringLiteral("sourceName"), sessionIt->sourceName}
+            {QStringLiteral("sourceName"), sessionIt->sourceName},
+            {QStringLiteral("videoPort"), videoPort(sessionIt->team)}
         });
         sendSnapshot(socket);
         sendMessage(socket, m_lastMatchState);
@@ -265,6 +465,7 @@ void MatchServer::processMessage(QTcpSocket *socket, const QJsonObject &message)
             {QStringLiteral("ok"), true},
             {QStringLiteral("sourceId"), sessionIt->sourceId},
             {QStringLiteral("sourceName"), sessionIt->sourceName},
+            {QStringLiteral("videoPort"), videoPort(sessionIt->team)},
             {QStringLiteral("message"), sessionIt->sourceId.isEmpty()
                                               ? tr("已取消视频源登记")
                                               : tr("视频源登记成功，等待视频传输模块接入")}

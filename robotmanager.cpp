@@ -63,6 +63,7 @@ void RobotManager::handleDatagram(const QByteArray &data, const QHostAddress &ad
         r.alive = false;
         r.shootEnabled = false;
         emit logMessage(QStringLiteral("[死亡] %1 阵亡").arg(robotTag(f.team, f.robotId)));
+        emit combatEvent(f.team, f.robotId, f.type);
         break;
     case proto::TypeRevive:
         r.alive = true;
@@ -73,9 +74,11 @@ void RobotManager::handleDatagram(const QByteArray &data, const QHostAddress &ad
         emit logMessage(QStringLiteral("[受击] %1 受到攻击，血量 -> %2")
                             .arg(robotTag(f.team, f.robotId))
                             .arg(f.hp));
+        emit combatEvent(f.team, f.robotId, f.type);
         break;
     case proto::TypeAttack:
         emit logMessage(QStringLiteral("[攻击] %1 进入攻击").arg(robotTag(f.team, f.robotId)));
+        emit combatEvent(f.team, f.robotId, f.type);
         break;
     case proto::TypeShootEnabled:
         r.shootEnabled = true;
