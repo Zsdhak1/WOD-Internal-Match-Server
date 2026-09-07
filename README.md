@@ -107,7 +107,7 @@ JSON 支持 `red` / `blue` 或 `redName` / `blueName` 字段：
 4. 启动 `ScompetitionClient.exe`，选择红方或蓝方，选择视频设备并完成登记。
 5. 在控制台打开转播画面，选择输出屏幕和当前导播视角。
 
-选手端会枚举 Windows 摄像头设备，并为选择的设备生成稳定的视频源标识。登记成功后，客户端使用 FFmpeg 将摄像头编码为 H.264，并通过 MPEG-TS/UDP 发送到服务端。服务端按红蓝方独立接收、解码，再通过 `BroadcastWindow::setSourceFrame()` 更新转播画面。
+选手端会枚举 Windows 摄像头设备，并为选择的设备生成稳定的视频源标识。设备列表同时使用 Windows 摄像头设备信息和 FFmpeg DirectShow 设备列表，因此没有 USB 摄像头时也可以使用电脑内置摄像头。点击视频源旁的 **内置摄像头** 会自动选择疑似内置摄像头并立即预览；如果驱动名称没有包含“Integrated / 内置”等关键词、但系统只检测到一个摄像头，也会将该设备作为内置摄像头使用。登记成功后，客户端使用 FFmpeg 将摄像头编码为 H.264，并通过 MPEG-TS/UDP 发送到服务端。服务端按红蓝方独立接收、解码，再通过 `BroadcastWindow::setSourceFrame()` 更新转播画面。
 
 客户端和服务端都会优先使用程序目录中的 `tools/ffmpeg/ffmpeg.exe`，因此正式发布包不依赖系统安装 FFmpeg。程序目录或系统 `PATH` 中的 FFmpeg 仍作为开发环境兼容路径。客户端推流参数为 1280×720、30 FPS、H.264 `ultrafast/zerolatency`，服务端输出 960×540 BGRA 帧供 Qt 显示。
 

@@ -42,6 +42,7 @@ private slots:
     void onLogoutClicked();
     void onRefreshVideoDevices();
     void onPreviewVideo();
+    void onUseBuiltInCamera();
     void onSelectVideoDevice();
     void onTeamChanged(int index);
     void onRegistrationSourceChanged(int index);
@@ -61,6 +62,7 @@ private:
     void appendLog(const QString &message);
     void refreshVideoDevices();
     void populateVideoCombo(QComboBox *combo, const QString &selectedId = QString());
+    int builtInCameraIndex(const QComboBox *combo) const;
     void updateAutoRobotIdentity();
     void updateSourceLabels(QComboBox *combo, QLabel *idLabel);
     void updateActiveRobotSource();

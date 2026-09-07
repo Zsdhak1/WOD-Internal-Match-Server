@@ -62,6 +62,32 @@ QString sourceIdForDevice(const QString &instanceId)
     return QStringLiteral("camera://windows/%1").arg(QString::fromLatin1(digest));
 }
 
+int builtInCameraScore(const QString &name)
+{
+    const QString normalized = name.toLower();
+    static const QStringList strongHints = {
+        QStringLiteral("integrated"), QStringLiteral("built-in"),
+        QStringLiteral("built in"), QStringLiteral("内置"),
+        QStringLiteral("笔记本"), QStringLiteral("laptop"),
+        QStringLiteral("user facing"), QStringLiteral("front camera")
+    };
+    static const QStringList cameraHints = {
+        QStringLiteral("camera"), QStringLiteral("webcam"),
+        QStringLiteral("摄像头"), QStringLiteral("相机")
+    };
+
+    int score = 0;
+    for (const QString &hint : strongHints) {
+        if (normalized.contains(hint))
+            score += 10;
+    }
+    for (const QString &hint : cameraHints) {
+        if (normalized.contains(hint))
+            score += 2;
+    }
+    return score;
+}
+
 void styleLabel(QLabel *label, const QColor &color, bool bold = false)
 {
     if (!label)
@@ -190,7 +216,7 @@ void ClientWindow::buildRegistrationOverlay()
     networkForm->addRow(tr("选手端名称"), m_displayNameEdit);
     cardLayout->addLayout(networkForm);
 
-    auto *sourceTitle = new QLabel(tr("机器人视频源"), card);
+    auto *sourceTitle = new QLabel(tr("机器人视频源（USB 或内置摄像头）"), card);
     QFont sourceTitleFont = sourceTitle->font();
     sourceTitleFont.setBold(true);
     sourceTitle->setFont(sourceTitleFont);
@@ -203,10 +229,13 @@ void ClientWindow::buildRegistrationOverlay()
             this, &ClientWindow::onRegistrationSourceChanged);
     auto *refreshButton = new QPushButton(tr("刷新"), card);
     connect(refreshButton, &QPushButton::clicked, this, &ClientWindow::onRefreshVideoDevices);
+    auto *builtInButton = new QPushButton(tr("内置摄像头"), card);
+    connect(builtInButton, &QPushButton::clicked, this, &ClientWindow::onUseBuiltInCamera);
     auto *previewButton = new QPushButton(tr("预览"), card);
     connect(previewButton, &QPushButton::clicked, this, &ClientWindow::onPreviewVideo);
     sourceRow->addWidget(m_registrationSourceEdit, 1);
     sourceRow->addWidget(refreshButton);
+    sourceRow->addWidget(builtInButton);
     sourceRow->addWidget(previewButton);
     cardLayout->addLayout(sourceRow);
 
@@ -287,7 +316,7 @@ void ClientWindow::buildControlLayer()
     robotHint->setStyleSheet(QStringLiteral("color: #9eabb5;"));
     panelLayout->addWidget(robotHint);
 
-    auto *sourceLabel = new QLabel(tr("当前机器人视频源"), m_controlPanel);
+    auto *sourceLabel = new QLabel(tr("当前机器人视频源（USB 或内置摄像头）"), m_controlPanel);
     sourceLabel->setStyleSheet(QStringLiteral("color: #c9d4da; font-weight: 600;"));
     panelLayout->addWidget(sourceLabel);
 
@@ -297,8 +326,11 @@ void ClientWindow::buildControlLayer()
             this, &ClientWindow::onSessionSourceChanged);
     auto *refreshButton = new QPushButton(tr("刷新"), m_controlPanel);
     connect(refreshButton, &QPushButton::clicked, this, &ClientWindow::onRefreshVideoDevices);
+    auto *builtInButton = new QPushButton(tr("内置摄像头"), m_controlPanel);
+    connect(builtInButton, &QPushButton::clicked, this, &ClientWindow::onUseBuiltInCamera);
     sourceRow->addWidget(m_videoDeviceEdit, 1);
     sourceRow->addWidget(refreshButton);
+    sourceRow->addWidget(builtInButton);
     panelLayout->addLayout(sourceRow);
 
     m_videoPreview = new QLabel(m_controlPanel);
@@ -743,6 +775,25 @@ void ClientWindow::onPreviewVideo()
     startVideoPreview();
 }
 
+void ClientWindow::onUseBuiltInCamera()
+{
+    QComboBox *combo = m_registered ? m_videoDeviceEdit : m_registrationSourceEdit;
+    const int index = builtInCameraIndex(combo);
+    if (index < 0) {
+        const QString message = tr("未找到内置摄像头，请先点击刷新，并确认 Windows 已允许应用访问摄像头。");
+        setVideoStatus(message, QColor(QStringLiteral("#f0aa36")));
+        if (!m_registered && m_loginStatus)
+            m_loginStatus->setText(message);
+        return;
+    }
+
+    combo->setCurrentIndex(index);
+    if (m_registered)
+        onSelectVideoDevice();
+    else
+        startVideoPreview();
+}
+
 void ClientWindow::onSelectVideoDevice()
 {
     if (!m_registered || !m_videoDeviceEdit)
@@ -800,6 +851,19 @@ void ClientWindow::refreshVideoDevices()
 {
     m_videoDevices.clear();
 
+    const auto appendDevice = [this](const QString &name, const QString &sourceId) {
+        const QString trimmedName = name.trimmed();
+        if (trimmedName.isEmpty() || sourceId.isEmpty())
+            return;
+        for (const auto &device : m_videoDevices) {
+            if (device.first.compare(trimmedName, Qt::CaseInsensitive) == 0
+                || device.second == sourceId) {
+                return;
+            }
+        }
+        m_videoDevices.append({trimmedName, sourceId});
+    };
+
 #ifdef Q_OS_WIN
     QProcess process;
     process.start(QStringLiteral("powershell.exe"), {
@@ -818,15 +882,44 @@ void ClientWindow::refreshVideoDevices()
                 continue;
 
             const QString sourceId = sourceIdForDevice(instanceId);
-            bool duplicate = false;
-            for (const auto &device : m_videoDevices) {
-                if (device.second == sourceId) {
-                    duplicate = true;
-                    break;
+            appendDevice(name, sourceId);
+        }
+    }
+
+    // Some laptop camera drivers are usable through DirectShow but do not
+    // appear in the PnP class query above. Ask the bundled FFmpeg for its
+    // actual DirectShow names so the built-in camera can still be selected.
+    const QString executable = ffmpegExecutable();
+    if (!executable.isEmpty()) {
+        QProcess process;
+        process.start(executable, {
+            QStringLiteral("-hide_banner"),
+            QStringLiteral("-list_devices"), QStringLiteral("true"),
+            QStringLiteral("-f"), QStringLiteral("dshow"),
+            QStringLiteral("-i"), QStringLiteral("dummy")
+        });
+        if (process.waitForFinished(2000)) {
+            const QString output = QString::fromLocal8Bit(process.readAllStandardError());
+            bool inVideoSection = false;
+            const QRegularExpression sectionPattern(
+                QStringLiteral("DirectShow (video|audio) devices"));
+            const QRegularExpression devicePattern(QStringLiteral("\\]\\s+\\\"([^\\\"]+)\\\""));
+            const QStringList lines = output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")),
+                                                   Qt::SkipEmptyParts);
+            for (const QString &line : lines) {
+                const auto sectionMatch = sectionPattern.match(line);
+                if (sectionMatch.hasMatch()) {
+                    inVideoSection = sectionMatch.captured(1) == QStringLiteral("video");
+                    continue;
+                }
+                if (!inVideoSection)
+                    continue;
+                const auto deviceMatch = devicePattern.match(line);
+                if (deviceMatch.hasMatch()) {
+                    const QString name = deviceMatch.captured(1).trimmed();
+                    appendDevice(name, sourceIdForDevice(QStringLiteral("dshow:") + name));
                 }
             }
-            if (!duplicate)
-                m_videoDevices.append({name, sourceId});
         }
     }
 #endif
@@ -848,10 +941,32 @@ void ClientWindow::populateVideoCombo(QComboBox *combo, const QString &selectedI
     for (const auto &device : m_videoDevices)
         combo->addItem(device.first, device.second);
     if (m_videoDevices.isEmpty())
-        combo->setToolTip(tr("未检测到摄像头；可安装 ffmpeg 后进行本地预览。"));
+        combo->setToolTip(tr("未检测到摄像头；可点击“内置摄像头”重试，或检查 Windows 摄像头权限。"));
 
     const int selected = combo->findData(selectedId);
     combo->setCurrentIndex(selected >= 0 ? selected : 0);
+}
+
+int ClientWindow::builtInCameraIndex(const QComboBox *combo) const
+{
+    if (!combo)
+        return -1;
+
+    int bestIndex = -1;
+    int bestScore = 0;
+    for (int index = 1; index < combo->count(); ++index) {
+        const int score = builtInCameraScore(combo->itemText(index));
+        if (score >= 10 && score > bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    }
+
+    // A single camera with a vendor-specific name is normally the laptop's
+    // internal camera, even when its name contains no standard hint.
+    if (bestIndex < 0 && combo->count() == 2)
+        bestIndex = 1;
+    return bestIndex;
 }
 
 void ClientWindow::updateAutoRobotIdentity()
