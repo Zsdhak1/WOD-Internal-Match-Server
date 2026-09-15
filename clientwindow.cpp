@@ -3,6 +3,9 @@
 #include "matchprotocol.h"
 
 #include <QAbstractSocket>
+#include <QCamera>
+#include <QCameraDevice>
+#include <QCameraFormat>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -19,10 +22,13 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMediaCaptureSession>
+#include <QMediaDevices>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QScreen>
 #include <QSignalBlocker>
 #include <QSizePolicy>
@@ -32,6 +38,8 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QVideoFrame>
+#include <QVideoSink>
 #include <QDir>
 
 namespace {
@@ -54,9 +62,13 @@ QColor teamColor(int team)
                             : QColor(QStringLiteral("#72b4ff"));
 }
 
-QString sourceIdForDevice(const QString &instanceId)
+// A stable id derived from the OS-level device id. Two different Qt backends
+// (FFmpeg vs WindowsMF) may describe the same physical camera with different
+// names but the same persistent id, so we hash the id rather than the display
+// name.
+QString sourceIdForDevice(const QByteArray &deviceId)
 {
-    const QByteArray digest = QCryptographicHash::hash(instanceId.toUtf8(),
+    const QByteArray digest = QCryptographicHash::hash(deviceId,
                                                         QCryptographicHash::Sha1)
                                   .toHex();
     return QStringLiteral("camera://windows/%1").arg(QString::fromLatin1(digest));
@@ -67,9 +79,15 @@ int builtInCameraScore(const QString &name)
     const QString normalized = name.toLower();
     static const QStringList strongHints = {
         QStringLiteral("integrated"), QStringLiteral("built-in"),
-        QStringLiteral("built in"), QStringLiteral("内置"),
-        QStringLiteral("笔记本"), QStringLiteral("laptop"),
-        QStringLiteral("user facing"), QStringLiteral("front camera")
+        QStringLiteral("built in"), QStringLiteral("builtin"),
+        QStringLiteral("internal"), QStringLiteral("内置"),
+        QStringLiteral("内置摄像机"), QStringLiteral("笔记本"),
+        QStringLiteral("笔记本电脑"), QStringLiteral("laptop"),
+        QStringLiteral("notebook")
+    };
+    static const QStringList frontFacingHints = {
+        QStringLiteral("user facing"), QStringLiteral("front camera"),
+        QStringLiteral("front"), QStringLiteral("前置")
     };
     static const QStringList cameraHints = {
         QStringLiteral("camera"), QStringLiteral("webcam"),
@@ -79,7 +97,11 @@ int builtInCameraScore(const QString &name)
     int score = 0;
     for (const QString &hint : strongHints) {
         if (normalized.contains(hint))
-            score += 10;
+            score += 20;
+    }
+    for (const QString &hint : frontFacingHints) {
+        if (normalized.contains(hint))
+            score += 6;
     }
     for (const QString &hint : cameraHints) {
         if (normalized.contains(hint))
@@ -169,14 +191,26 @@ void ClientWindow::buildRegistrationOverlay()
         "QPushButton#registerButton { background: #2f6d8e; border-color: #72b4ff; font-weight: 700; min-height: 42px; }"
         "QLabel#registrationStatus { color: #d5e0e6; }"));
 
-    auto *root = new QHBoxLayout(m_registrationOverlay);
-    root->setContentsMargins(30, 30, 30, 30);
-    root->addStretch(1);
+    auto *root = new QVBoxLayout(m_registrationOverlay);
+    root->setContentsMargins(24, 24, 24, 24);
+    root->setSpacing(0);
 
-    auto *card = new QFrame(m_registrationOverlay);
+    auto *registrationScroll = new QScrollArea(m_registrationOverlay);
+    registrationScroll->setFrameShape(QFrame::NoFrame);
+    registrationScroll->setWidgetResizable(true);
+    registrationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    registrationScroll->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    auto *registrationPage = new QWidget;
+    registrationPage->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto *registrationPageLayout = new QVBoxLayout(registrationPage);
+    registrationPageLayout->setContentsMargins(0, 0, 0, 0);
+    registrationPageLayout->setSpacing(0);
+
+    auto *card = new QFrame(registrationPage);
     card->setObjectName(QStringLiteral("registrationCard"));
-    card->setMaximumWidth(700);
-    card->setMinimumWidth(520);
+    card->setMinimumWidth(0);
+    card->setMaximumWidth(820);
+    card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     auto *cardLayout = new QVBoxLayout(card);
     cardLayout->setContentsMargins(34, 30, 34, 30);
     cardLayout->setSpacing(13);
@@ -222,7 +256,8 @@ void ClientWindow::buildRegistrationOverlay()
     sourceTitle->setFont(sourceTitleFont);
     cardLayout->addWidget(sourceTitle);
 
-    auto *sourceRow = new QHBoxLayout;
+    auto *sourceLayout = new QVBoxLayout;
+    sourceLayout->setSpacing(7);
     m_registrationSourceEdit = new QComboBox(card);
     m_registrationSourceEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(m_registrationSourceEdit, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -233,16 +268,21 @@ void ClientWindow::buildRegistrationOverlay()
     connect(builtInButton, &QPushButton::clicked, this, &ClientWindow::onUseBuiltInCamera);
     auto *previewButton = new QPushButton(tr("预览"), card);
     connect(previewButton, &QPushButton::clicked, this, &ClientWindow::onPreviewVideo);
-    sourceRow->addWidget(m_registrationSourceEdit, 1);
-    sourceRow->addWidget(refreshButton);
-    sourceRow->addWidget(builtInButton);
-    sourceRow->addWidget(previewButton);
-    cardLayout->addLayout(sourceRow);
+    sourceLayout->addWidget(m_registrationSourceEdit);
+    auto *sourceActions = new QHBoxLayout;
+    sourceActions->setSpacing(7);
+    sourceActions->addWidget(refreshButton, 1);
+    sourceActions->addWidget(builtInButton, 1);
+    sourceActions->addWidget(previewButton, 1);
+    sourceLayout->addLayout(sourceActions);
+    cardLayout->addLayout(sourceLayout);
 
     m_registrationPreview = new QLabel(card);
     m_registrationPreview->setObjectName(QStringLiteral("registrationPreview"));
     m_registrationPreview->setAlignment(Qt::AlignCenter);
-    m_registrationPreview->setFixedSize(520, 250);
+    m_registrationPreview->setMinimumSize(280, 158);
+    m_registrationPreview->setMaximumSize(720, 405);
+    m_registrationPreview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_registrationPreview->setText(tr("选择视频源后点击“预览”"));
     cardLayout->addWidget(m_registrationPreview, 0, Qt::AlignHCenter);
 
@@ -256,8 +296,11 @@ void ClientWindow::buildRegistrationOverlay()
     m_loginStatus->setWordWrap(true);
     cardLayout->addWidget(m_loginStatus);
 
-    root->addWidget(card, 0, Qt::AlignCenter);
-    root->addStretch(1);
+    registrationPageLayout->addStretch(1);
+    registrationPageLayout->addWidget(card, 0, Qt::AlignHCenter);
+    registrationPageLayout->addStretch(1);
+    registrationScroll->setWidget(registrationPage);
+    root->addWidget(registrationScroll, 1);
 }
 
 void ClientWindow::buildControlLayer()
@@ -297,7 +340,9 @@ void ClientWindow::buildControlLayer()
 
     m_controlPanel = new QFrame(m_controlLayer);
     m_controlPanel->setObjectName(QStringLiteral("clientControls"));
-    m_controlPanel->setFixedWidth(430);
+    m_controlPanel->setMinimumWidth(360);
+    m_controlPanel->setMaximumWidth(520);
+    m_controlPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     auto *panelLayout = new QVBoxLayout(m_controlPanel);
     panelLayout->setContentsMargins(18, 16, 18, 16);
     panelLayout->setSpacing(9);
@@ -320,7 +365,8 @@ void ClientWindow::buildControlLayer()
     sourceLabel->setStyleSheet(QStringLiteral("color: #c9d4da; font-weight: 600;"));
     panelLayout->addWidget(sourceLabel);
 
-    auto *sourceRow = new QHBoxLayout;
+    auto *sourceLayout = new QVBoxLayout;
+    sourceLayout->setSpacing(7);
     m_videoDeviceEdit = new QComboBox(m_controlPanel);
     connect(m_videoDeviceEdit, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &ClientWindow::onSessionSourceChanged);
@@ -328,15 +374,20 @@ void ClientWindow::buildControlLayer()
     connect(refreshButton, &QPushButton::clicked, this, &ClientWindow::onRefreshVideoDevices);
     auto *builtInButton = new QPushButton(tr("内置摄像头"), m_controlPanel);
     connect(builtInButton, &QPushButton::clicked, this, &ClientWindow::onUseBuiltInCamera);
-    sourceRow->addWidget(m_videoDeviceEdit, 1);
-    sourceRow->addWidget(refreshButton);
-    sourceRow->addWidget(builtInButton);
-    panelLayout->addLayout(sourceRow);
+    sourceLayout->addWidget(m_videoDeviceEdit);
+    auto *sourceActions = new QHBoxLayout;
+    sourceActions->setSpacing(7);
+    sourceActions->addWidget(refreshButton, 1);
+    sourceActions->addWidget(builtInButton, 1);
+    sourceLayout->addLayout(sourceActions);
+    panelLayout->addLayout(sourceLayout);
 
     m_videoPreview = new QLabel(m_controlPanel);
     m_videoPreview->setObjectName(QStringLiteral("clientPreview"));
     m_videoPreview->setAlignment(Qt::AlignCenter);
-    m_videoPreview->setFixedSize(394, 220);
+    m_videoPreview->setMinimumSize(280, 158);
+    m_videoPreview->setMaximumSize(480, 270);
+    m_videoPreview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_videoPreview->setText(tr("尚未开始预览"));
     panelLayout->addWidget(m_videoPreview, 0, Qt::AlignHCenter);
 
@@ -362,7 +413,8 @@ void ClientWindow::buildControlLayer()
     m_log = new QPlainTextEdit(m_controlPanel);
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(500);
-    m_log->setFixedHeight(86);
+    m_log->setMinimumHeight(54);
+    m_log->setMaximumHeight(120);
     panelLayout->addWidget(m_log);
 
     auto *logoutButton = new QPushButton(tr("取消登记并返回"), m_controlPanel);
@@ -379,6 +431,7 @@ void ClientWindow::showLoginPage()
     m_loginInProgress = false;
     if (m_loginTimeoutTimer)
         m_loginTimeoutTimer->stop();
+    clearSettlement();
 
     const QString previousSourceId = m_activeSourceId;
     m_registered = false;
@@ -388,7 +441,6 @@ void ClientWindow::showLoginPage()
     m_activeSourceId.clear();
     m_activeSourceName.clear();
     m_videoPort = 0;
-    m_videoBuffer.clear();
     if (!previousSourceId.isEmpty())
         setSourceFrame(previousSourceId, QImage());
     stopVideoPreview();
@@ -743,10 +795,31 @@ void ClientWindow::handleMatchState(const QJsonObject &message)
         setTeamNames(redName.isEmpty() ? tr("红方") : redName,
                      blueName.isEmpty() ? tr("蓝方") : blueName);
 
+    const bool ended = message.value(QStringLiteral("ended")).toBool(false);
+    const QString settlement = message.value(QStringLiteral("settlement")).toString().trimmed();
+    QString localSettlement = settlement;
+    if ((settlement == QStringLiteral("redwin") && m_selectedTeam == 2)
+        || (settlement == QStringLiteral("bluewin") && m_selectedTeam == 1)) {
+        localSettlement = QStringLiteral("defeated");
+    }
+    const bool sameSettlement = ended && roundEnded()
+                                && localSettlement == settlementType();
+
     setScores(message.value(QStringLiteral("redScore")).toInt(0),
               message.value(QStringLiteral("blueScore")).toInt(0));
-    setMatchState(message.value(QStringLiteral("remainingSeconds")).toInt(60),
-                  message.value(QStringLiteral("running")).toBool(false));
+
+    if (!ended || settlement.isEmpty()) {
+        setMatchState(message.value(QStringLiteral("remainingSeconds")).toInt(60),
+                      message.value(QStringLiteral("running")).toBool(false));
+        stopSettlement();
+        return;
+    }
+
+    if (!sameSettlement) {
+        setMatchState(message.value(QStringLiteral("remainingSeconds")).toInt(60),
+                      message.value(QStringLiteral("running")).toBool(false));
+        playSettlement(localSettlement);
+    }
 }
 
 void ClientWindow::onRefreshVideoDevices()
@@ -826,9 +899,17 @@ void ClientWindow::onSessionSourceChanged(int)
     if (!m_registered)
         return;
 
-    m_activeSourceId = selectedSourceId(m_videoDeviceEdit);
-    m_activeSourceName = selectedSourceName(m_videoDeviceEdit);
+    const QString nextId = selectedSourceId(m_videoDeviceEdit);
+    const QString nextName = selectedSourceName(m_videoDeviceEdit);
+    if (nextId == m_activeSourceId && nextName == m_activeSourceName)
+        return;
+
+    m_activeSourceId = nextId;
+    m_activeSourceName = nextName;
     updateActiveRobotSource();
+    // Switching the registered source takes effect immediately: the camera is
+    // reopened and upstream streaming is restarted against the new device.
+    startVideoPreview();
 }
 
 void ClientWindow::onToggleControls()
@@ -839,6 +920,8 @@ void ClientWindow::onToggleControls()
     const bool visible = !m_controlPanel->isVisible();
     m_controlPanel->setVisible(visible);
     m_controlsButton->setText(visible ? tr("隐藏设置") : tr("视频设置"));
+    if (visible && !m_lastVideoFrame.isNull())
+        showFramePreview(m_lastVideoFrame);
 }
 
 void ClientWindow::appendLog(const QString &message)
@@ -851,8 +934,13 @@ void ClientWindow::refreshVideoDevices()
 {
     m_videoDevices.clear();
 
-    const auto appendDevice = [this](const QString &name, const QString &sourceId) {
+    // QMediaDevices is the authoritative source on Windows: it maps to
+    // MediaFoundation's device list and exposes a persistent id per camera.
+    // FFmpeg's dshow enumeration produces different names for the same
+    // hardware, so we no longer shell out to ffmpeg just to list devices.
+    const auto appendDevice = [this](const QString &name, const QByteArray &deviceId) {
         const QString trimmedName = name.trimmed();
+        const QString sourceId = sourceIdForDevice(deviceId);
         if (trimmedName.isEmpty() || sourceId.isEmpty())
             return;
         for (const auto &device : m_videoDevices) {
@@ -864,65 +952,8 @@ void ClientWindow::refreshVideoDevices()
         m_videoDevices.append({trimmedName, sourceId});
     };
 
-#ifdef Q_OS_WIN
-    QProcess process;
-    process.start(QStringLiteral("powershell.exe"), {
-        QStringLiteral("-NoProfile"), QStringLiteral("-Command"),
-        QStringLiteral("Get-PnpDevice -PresentOnly | Where-Object { $_.Class -eq 'Camera' -or $_.Class -eq 'Image' } | ForEach-Object { \"$($_.InstanceId)`t$($_.FriendlyName)\" }")
-    });
-    if (process.waitForFinished(1500)) {
-        const QStringList lines = QString::fromLocal8Bit(process.readAllStandardOutput())
-                                      .split(QRegularExpression(QStringLiteral("[\\r\\n]+")),
-                                             Qt::SkipEmptyParts);
-        for (const QString &line : lines) {
-            const QStringList parts = line.split(QChar('\t'));
-            const QString instanceId = parts.value(0).trimmed();
-            const QString name = parts.mid(1).join(QStringLiteral("\t")).trimmed();
-            if (instanceId.isEmpty() || name.isEmpty())
-                continue;
-
-            const QString sourceId = sourceIdForDevice(instanceId);
-            appendDevice(name, sourceId);
-        }
-    }
-
-    // Some laptop camera drivers are usable through DirectShow but do not
-    // appear in the PnP class query above. Ask the bundled FFmpeg for its
-    // actual DirectShow names so the built-in camera can still be selected.
-    const QString executable = ffmpegExecutable();
-    if (!executable.isEmpty()) {
-        QProcess process;
-        process.start(executable, {
-            QStringLiteral("-hide_banner"),
-            QStringLiteral("-list_devices"), QStringLiteral("true"),
-            QStringLiteral("-f"), QStringLiteral("dshow"),
-            QStringLiteral("-i"), QStringLiteral("dummy")
-        });
-        if (process.waitForFinished(2000)) {
-            const QString output = QString::fromLocal8Bit(process.readAllStandardError());
-            bool inVideoSection = false;
-            const QRegularExpression sectionPattern(
-                QStringLiteral("DirectShow (video|audio) devices"));
-            const QRegularExpression devicePattern(QStringLiteral("\\]\\s+\\\"([^\\\"]+)\\\""));
-            const QStringList lines = output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")),
-                                                   Qt::SkipEmptyParts);
-            for (const QString &line : lines) {
-                const auto sectionMatch = sectionPattern.match(line);
-                if (sectionMatch.hasMatch()) {
-                    inVideoSection = sectionMatch.captured(1) == QStringLiteral("video");
-                    continue;
-                }
-                if (!inVideoSection)
-                    continue;
-                const auto deviceMatch = devicePattern.match(line);
-                if (deviceMatch.hasMatch()) {
-                    const QString name = deviceMatch.captured(1).trimmed();
-                    appendDevice(name, sourceIdForDevice(QStringLiteral("dshow:") + name));
-                }
-            }
-        }
-    }
-#endif
+    for (const QCameraDevice &device : QMediaDevices::videoInputs())
+        appendDevice(device.description(), device.id());
 
     populateVideoCombo(m_registrationSourceEdit);
     populateVideoCombo(m_videoDeviceEdit);
@@ -1039,7 +1070,6 @@ void ClientWindow::startVideoPreview()
 
     m_activeSourceId = sourceId;
     m_activeSourceName = sourceName;
-    m_videoBuffer.clear();
 
     stopVideoPreview();
     updateActiveRobotSource();
@@ -1050,97 +1080,76 @@ void ClientWindow::startVideoPreview()
         return;
     }
 
-    const QString executable = ffmpegExecutable();
-    if (executable.isEmpty()) {
-        showFramePreview(QImage());
-        setVideoStatus(tr("未找到 ffmpeg，无法启动本地预览；视频源仍可登记。"),
-                       QColor(QStringLiteral("#f0aa36")));
+    // === Local preview via Qt Multimedia (native MediaFoundation backend) ===
+    // A dedicated QVideoSink receives camera frames and forwards each one to
+    // showFramePreview + setSourceFrame. No ffmpeg fork, no JPEG round-trip,
+    // no pipe buffer to manage.
+    QCameraDevice selected;
+    bool found = false;
+    for (const QCameraDevice &dev : QMediaDevices::videoInputs()) {
+        if (sourceIdForDevice(dev.id()) == sourceId) {
+            selected = dev;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        setVideoStatus(tr("找不到视频源对应的本机摄像头，请刷新设备列表。"),
+                       QColor(QStringLiteral("#ff6872")));
         return;
     }
 
-    m_videoProcess = new QProcess(this);
-    QProcess *process = m_videoProcess;
-    process->setProcessChannelMode(QProcess::SeparateChannels);
-    connect(process, &QProcess::readyReadStandardOutput,
-            this, &ClientWindow::consumeVideoOutput);
-    connect(process, &QProcess::errorOccurred, this,
-            [this, process](QProcess::ProcessError) {
-        if (m_videoProcess != process)
-            return;
-        setVideoStatus(tr("视频采集启动失败：%1").arg(process->errorString()),
+    m_captureSession = new QMediaCaptureSession(this);
+    m_camera = new QCamera(selected, this);
+    m_videoSink = new QVideoSink(this);
+    m_captureSession->setCamera(m_camera);
+    m_captureSession->setVideoSink(m_videoSink);
+
+    // Ask the camera for a 1280x720 feed so onCameraFrame is a cheap
+    // pass-through. Qt6 calls this a QCameraFormat (not QVideoFrameFormat).
+    // If no 720p mode is advertised we keep the device's default format and
+    // let onCameraFrame do a cheap per-frame rescale instead.
+    {
+        const auto formats = selected.videoFormats();
+        QCameraFormat preferred;
+        for (const auto &fmt : formats) {
+            if (fmt.resolution() == QSize(1280, 720)
+                && fmt.pixelFormat() == QVideoFrameFormat::Format_ARGB8888) {
+                preferred = fmt;
+                break;
+            }
+        }
+        if (preferred.isNull()) {
+            for (const auto &fmt : formats) {
+                if (fmt.resolution() == QSize(1280, 720)) {
+                    preferred = fmt;
+                    break;
+                }
+            }
+        }
+        if (!preferred.isNull())
+            m_camera->setCameraFormat(preferred);
+    }
+
+    connect(m_videoSink, &QVideoSink::videoFrameChanged,
+            this, &ClientWindow::onCameraFrame);
+    connect(m_camera, &QCamera::errorOccurred, this,
+            [this](QCamera::Error, const QString &errorString) {
+        setVideoStatus(tr("摄像头错误：%1").arg(errorString),
                        QColor(QStringLiteral("#ff6872")));
         scheduleVideoRestart();
     });
-    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [this, process](int, QProcess::ExitStatus) {
-        if (m_videoProcess != process)
-            return;
-        m_videoProcess = nullptr;
-        process->deleteLater();
-        setVideoStatus(tr("视频采集已停止，正在尝试恢复。"),
-                       QColor(QStringLiteral("#f0aa36")));
-        scheduleVideoRestart();
-    });
 
-    QStringList arguments = {
-        QStringLiteral("-hide_banner"),
-        QStringLiteral("-loglevel"), QStringLiteral("error"),
-        QStringLiteral("-f"), QStringLiteral("dshow"),
-        QStringLiteral("-thread_queue_size"), QStringLiteral("512"),
-        QStringLiteral("-framerate"), QStringLiteral("30"),
-        QStringLiteral("-video_size"), QStringLiteral("1280x720"),
-        QStringLiteral("-i"), QStringLiteral("video=%1").arg(sourceName),
-        QStringLiteral("-an")
-    };
+    m_camera->start();
 
-    const bool streamToServer = m_registered && m_videoPort > 0 && m_serverEdit;
-    if (streamToServer) {
-        QString server = m_serverEdit->text().trimmed();
-        if (server.contains(QLatin1Char(':')) && !server.startsWith(QLatin1Char('[')))
-            server = QStringLiteral("[%1]").arg(server);
-        const QString udpUrl = QStringLiteral(
-            "udp://%1:%2?pkt_size=1316&buffer_size=65536&connect=1")
-                                   .arg(server)
-                                   .arg(m_videoPort);
-        arguments << QStringLiteral("-filter_complex")
-                  << QStringLiteral("[0:v:0]split=2[vnet][vpreview]")
-                  << QStringLiteral("-map") << QStringLiteral("[vnet]")
-                  << QStringLiteral("-c:v") << QStringLiteral("libx264")
-                  << QStringLiteral("-preset") << QStringLiteral("ultrafast")
-                  << QStringLiteral("-tune") << QStringLiteral("zerolatency")
-                  << QStringLiteral("-pix_fmt") << QStringLiteral("yuv420p")
-                  << QStringLiteral("-b:v") << QStringLiteral("3500k")
-                  << QStringLiteral("-maxrate") << QStringLiteral("3500k")
-                  << QStringLiteral("-bufsize") << QStringLiteral("7000k")
-                  << QStringLiteral("-g") << QStringLiteral("30")
-                  << QStringLiteral("-keyint_min") << QStringLiteral("30")
-                  << QStringLiteral("-sc_threshold") << QStringLiteral("0")
-                  << QStringLiteral("-bf") << QStringLiteral("0")
-                  << QStringLiteral("-flush_packets") << QStringLiteral("1")
-                  << QStringLiteral("-f") << QStringLiteral("mpegts")
-                  << udpUrl
-                  << QStringLiteral("-map") << QStringLiteral("[vpreview]")
-                  << QStringLiteral("-c:v") << QStringLiteral("mjpeg")
-                  << QStringLiteral("-q:v") << QStringLiteral("5")
-                  << QStringLiteral("-f") << QStringLiteral("mjpeg")
-                  << QStringLiteral("pipe:1");
-    } else {
-        arguments << QStringLiteral("-f") << QStringLiteral("mjpeg")
-                  << QStringLiteral("-q:v") << QStringLiteral("5")
-                  << QStringLiteral("pipe:1");
-    }
+    // === Optional upstream: push H.264 to the server over UDP ===
+    // Kept in a separate ffmpeg child so the local preview stays responsive
+    // even when the network is congested.
+    if (m_registered && m_videoPort > 0 && m_serverEdit)
+        startStreaming();
 
-    process->start(executable, arguments);
-
-    if (!process->waitForStarted(800)) {
-        setVideoStatus(tr("无法启动 ffmpeg：%1").arg(process->errorString()),
-                       QColor(QStringLiteral("#ff6872")));
-        stopVideoPreview();
-        scheduleVideoRestart();
-        return;
-    }
-
-    setVideoStatus(streamToServer
+    const bool streaming = m_streamProcess && m_streamProcess->state() != QProcess::NotRunning;
+    setVideoStatus(streaming
                        ? tr("H.264 推流中：%1 · UDP %2").arg(sourceName).arg(m_videoPort)
                        : tr("正在预览：%1").arg(sourceName),
                    QColor(QStringLiteral("#72d39a")));
@@ -1150,11 +1159,107 @@ void ClientWindow::stopVideoPreview()
 {
     if (m_videoRestartTimer)
         m_videoRestartTimer->stop();
-    if (!m_videoProcess)
-        return;
+    stopStreaming();
 
-    QProcess *process = m_videoProcess;
-    m_videoProcess = nullptr;
+    if (m_camera) {
+        m_camera->stop();
+        m_camera->deleteLater();
+        m_camera = nullptr;
+    }
+    if (m_captureSession) {
+        m_captureSession->deleteLater();
+        m_captureSession = nullptr;
+    }
+    if (m_videoSink) {
+        m_videoSink->deleteLater();
+        m_videoSink = nullptr;
+    }
+}
+
+void ClientWindow::startStreaming()
+{
+    if (m_streamProcess)
+        return; // already running
+
+    const QString executable = ffmpegExecutable();
+    if (executable.isEmpty()) {
+        appendLog(tr("未找到 ffmpeg，无法推流；本地预览继续运行。"));
+        return;
+    }
+    if (!m_camera || !m_camera->isActive()) {
+        appendLog(tr("摄像头未激活，推流取消。"));
+        return;
+    }
+
+    auto *process = new QProcess(this);
+    m_streamProcess = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError) {
+        if (m_streamProcess != process)
+            return;
+        appendLog(tr("推流进程错误：%1").arg(process->errorString()));
+        process->deleteLater();
+        m_streamProcess = nullptr;
+    });
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, process](int, QProcess::ExitStatus) {
+        if (m_streamProcess != process)
+            return;
+        m_streamProcess = nullptr;
+        process->deleteLater();
+    });
+
+    QString server = m_serverEdit->text().trimmed();
+    if (server.contains(QLatin1Char(':')) && !server.startsWith(QLatin1Char('[')))
+        server = QStringLiteral("[%1]").arg(server);
+    const QString udpUrl = QStringLiteral(
+        "udp://%1:%2?pkt_size=1316&buffer_size=65536&connect=1")
+                               .arg(server)
+                               .arg(m_videoPort);
+
+    // Feed raw BGRA frames into ffmpeg's stdin. The camera is opened by Qt
+    // (MediaFoundation), so we cannot also have ffmpeg open it via dshow —
+    // most webcams only allow one exclusive handle. Encoding from a pipe
+    // keeps both consumers on the same physical device.
+    process->start(executable, {
+        QStringLiteral("-hide_banner"),
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("rawvideo"),
+        QStringLiteral("-pixel_format"), QStringLiteral("bgra"),
+        QStringLiteral("-video_size"), QStringLiteral("1280x720"),
+        QStringLiteral("-framerate"), QStringLiteral("30"),
+        QStringLiteral("-i"), QStringLiteral("pipe:0"),
+        QStringLiteral("-an"),
+        QStringLiteral("-c:v"), QStringLiteral("libx264"),
+        QStringLiteral("-preset"), QStringLiteral("ultrafast"),
+        QStringLiteral("-tune"), QStringLiteral("zerolatency"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+        QStringLiteral("-b:v"), QStringLiteral("3500k"),
+        QStringLiteral("-maxrate"), QStringLiteral("3500k"),
+        QStringLiteral("-bufsize"), QStringLiteral("7000k"),
+        QStringLiteral("-g"), QStringLiteral("30"),
+        QStringLiteral("-keyint_min"), QStringLiteral("30"),
+        QStringLiteral("-sc_threshold"), QStringLiteral("0"),
+        QStringLiteral("-bf"), QStringLiteral("0"),
+        QStringLiteral("-flush_packets"), QStringLiteral("1"),
+        QStringLiteral("-f"), QStringLiteral("mpegts"),
+        udpUrl
+    });
+
+    if (!process->waitForStarted(800)) {
+        appendLog(tr("无法启动 ffmpeg 推流：%1").arg(process->errorString()));
+        process->deleteLater();
+        m_streamProcess = nullptr;
+    }
+}
+
+void ClientWindow::stopStreaming()
+{
+    if (!m_streamProcess)
+        return;
+    QProcess *process = m_streamProcess;
+    m_streamProcess = nullptr;
     process->disconnect(this);
     if (process->state() != QProcess::NotRunning) {
         process->kill();
@@ -1171,49 +1276,38 @@ void ClientWindow::scheduleVideoRestart()
     }
 }
 
-void ClientWindow::consumeVideoOutput()
+void ClientWindow::onCameraFrame(const QVideoFrame &frame)
 {
-    if (!m_videoProcess)
+    if (!frame.isValid())
         return;
+    const QImage image = frame.toImage();
+    if (image.isNull())
+        return;
+    m_lastVideoFrame = image;
+    showFramePreview(image);
+    if (m_registered && !m_activeSourceId.isEmpty())
+        setSourceFrame(m_activeSourceId, image);
 
-    m_videoBuffer.append(m_videoProcess->readAllStandardOutput());
-    const QByteArray jpegStart = QByteArray::fromHex("ffd8");
-    const QByteArray jpegEnd = QByteArray::fromHex("ffd9");
-
-    while (true) {
-        int start = m_videoBuffer.indexOf(jpegStart);
-        if (start < 0) {
-            if (m_videoBuffer.size() > 2 * 1024 * 1024)
-                m_videoBuffer.clear();
-            return;
+    // Feed the same frame to the upstream encoder when streaming is active.
+    // Frames arrive in whatever pixel format/resolution the camera negotiated;
+    // we only convert when the format differs from ARGB32 or the size is not
+    // 1280x720 — in the common case this is a single memcpy into the pipe.
+    if (m_streamProcess && m_streamProcess->state() == QProcess::Running) {
+        const bool needsConvert = image.format() != QImage::Format_ARGB32;
+        const bool needsScale = image.width() != 1280 || image.height() != 720;
+        if (!needsConvert && !needsScale) {
+            m_streamProcess->write(reinterpret_cast<const char *>(image.constBits()),
+                                   image.sizeInBytes());
+        } else {
+            QImage rgba = needsConvert
+                              ? image.convertToFormat(QImage::Format_ARGB32)
+                              : image;
+            if (needsScale)
+                rgba = rgba.scaled(1280, 720, Qt::IgnoreAspectRatio,
+                                   Qt::FastTransformation);
+            m_streamProcess->write(reinterpret_cast<const char *>(rgba.constBits()),
+                                   rgba.sizeInBytes());
         }
-        if (start > 0)
-            m_videoBuffer.remove(0, start);
-
-        const int end = m_videoBuffer.indexOf(jpegEnd, 2);
-        if (end < 0) {
-            if (m_videoBuffer.size() > 2 * 1024 * 1024)
-                m_videoBuffer.remove(0, m_videoBuffer.size() - 2);
-            return;
-        }
-
-        const QByteArray jpeg = m_videoBuffer.left(end + jpegEnd.size());
-        m_videoBuffer.remove(0, end + jpegEnd.size());
-        QImage frame;
-        if (!frame.loadFromData(jpeg, "JPG"))
-            continue;
-
-        showFramePreview(frame);
-        if (!m_activeSourceId.isEmpty())
-            setSourceFrame(m_activeSourceId, frame);
-        if (m_registered)
-            setActiveSource(m_activeSourceId.isEmpty()
-                               ? QStringLiteral("client://team%1/robot%2")
-                                     .arg(m_selectedTeam).arg(selectedRobotId())
-                               : m_activeSourceId,
-                           ownViewTitle());
-        setVideoStatus(tr("预览中：%1 × %2").arg(frame.width()).arg(frame.height()),
-                       QColor(QStringLiteral("#72d39a")));
     }
 }
 
@@ -1237,8 +1331,10 @@ void ClientWindow::showFramePreview(const QImage &frame)
     const auto setPreview = [&frame](QLabel *label) {
         if (!label)
             return;
+        if (!label->isVisible())
+            return;
         const QPixmap pixmap = QPixmap::fromImage(frame).scaled(
-            label->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            label->size(), Qt::KeepAspectRatio, Qt::FastTransformation);
         label->setText(QString());
         label->setPixmap(pixmap);
     };
@@ -1329,6 +1425,7 @@ QVector<RobotManager::RobotInfo> ClientWindow::robotInfosFromSnapshot(
 void ClientWindow::closeEvent(QCloseEvent *event)
 {
     stopVideoPreview();
+    stopSettlement();
     if (m_socket && m_socket->state() != QAbstractSocket::UnconnectedState)
         m_socket->disconnectFromHost();
     event->accept();
@@ -1342,6 +1439,18 @@ void ClientWindow::resizeEvent(QResizeEvent *event)
         if (m_registrationOverlay->isVisible())
             m_registrationOverlay->raise();
     }
+
+    const auto resizePreview = [](QLabel *preview) {
+        if (!preview || preview->width() <= 0)
+            return;
+        const int height = qBound(158, qRound(preview->width() * 9.0 / 16.0),
+                                  preview->maximumHeight() > 0
+                                      ? preview->maximumHeight()
+                                      : 405);
+        preview->setFixedHeight(height);
+    };
+    resizePreview(m_registrationPreview);
+    resizePreview(m_videoPreview);
     if (m_lastVideoFrame.isNull())
         return;
     showFramePreview(m_lastVideoFrame);

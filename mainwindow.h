@@ -5,7 +5,10 @@
 
 #include <QMainWindow>
 
+class QGroupBox;
+class QHBoxLayout;
 class QUdpSocket;
+class RobotCommander;
 class RobotManager;
 class BroadcastWindow;
 class MatchServer;
@@ -27,6 +30,9 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private slots:
     void onReadyRead();
     void refreshTable();
@@ -35,7 +41,9 @@ private slots:
     void onShowBroadcast();
     void onBroadcastScreenChanged(int index);
     void onToggleMatch();
+    void onTerminateMatch();
     void onResetMatch();
+    void onTestVictoryAnimation();
     void onToggleClientServer();
     void onProgramModeChanged(int index);
     void onProgramSourceChanged(int index);
@@ -51,6 +59,18 @@ private slots:
     void onAwardYellowCard();
     void onClearCards();
     void onVideoSourcesChanged(const QVector<MatchServer::VideoSourceInfo> &sources);
+    void onSourceFrameUpdated(const QString &sourceId);
+    // V2: 回 ACK / 处理 ESP32 ACK / 学习端点
+    void onReliableEventNeedsAck(quint8 robotId, quint8 type, quint32 txid,
+                                 const QHostAddress &addr, quint16 port);
+    void onRobotAck(quint8 ackedType, quint32 txid, quint8 result, quint8 robotId);
+    void onEndpointLearned(quint8 robotId, const QHostAddress &ip, quint16 port);
+    // V2 设备管理
+    void onAssignTeam();
+    void onForcePowerOn();
+    void onForcePowerOff();
+    void onSetHp();
+    void onRequestStatus();
     void onLayoutElementChanged(int index);
     void onLayoutPositionChanged();
     void onLayoutSizeChanged();
@@ -68,6 +88,8 @@ private:
     void stopClientServer();
     void publishMatchState();
     void updateProgramSourceList();
+    void rebuildSourcePreviewStrip();
+    void refreshSourcePreviewBadges();
     void refreshLayoutPositionEditors();
     bool importTeamTable(const QString &filePath, QString *errorMessage);
     void updateTeamPairControls();
@@ -78,6 +100,7 @@ private:
 
     QUdpSocket     *m_socket    = nullptr;
     RobotManager   *m_robots    = nullptr;
+    RobotCommander *m_commander = nullptr;
     BroadcastWindow *m_broadcast = nullptr;
     MatchServer    *m_matchServer = nullptr;
 
@@ -89,7 +112,10 @@ private:
     QPushButton    *m_listenBtn = nullptr;
     QPushButton    *m_broadcastBtn = nullptr;
     QPushButton    *m_matchBtn = nullptr;
+    QPushButton    *m_terminateMatchBtn = nullptr;
     QPushButton    *m_resetMatchBtn = nullptr;
+    QPushButton    *m_testVictoryAnimationBtn = nullptr;
+    QComboBox      *m_settlementPreviewTypeEdit = nullptr;
     QSpinBox       *m_clientPortEdit = nullptr;
     QPushButton    *m_clientListenBtn = nullptr;
     QLabel         *m_clientStateLabel = nullptr;
@@ -119,6 +145,14 @@ private:
     QPushButton    *m_saveLayoutBtn = nullptr;
     QPushButton    *m_loadLayoutBtn = nullptr;
     QTimer         *m_autoSwitchTimer = nullptr;
+    QGroupBox      *m_sourcePreviewGroup = nullptr;
+    QHBoxLayout    *m_sourcePreviewLayout = nullptr;
+    // sourceId -> preview QLabel. Rebuilt whenever the source list changes.
+    QHash<QString, QLabel *> m_sourcePreviewViews;
+    // V2 设备管理
+    QSpinBox       *m_deviceRobotEdit = nullptr;
+    QComboBox      *m_deviceTeamEdit = nullptr;
+    QSpinBox       *m_deviceHpEdit = nullptr;
     QVector<MatchServer::VideoSourceInfo> m_videoSources;
     struct TeamPair {
         QString redName;

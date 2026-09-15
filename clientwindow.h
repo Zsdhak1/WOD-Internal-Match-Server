@@ -7,17 +7,23 @@
 #include <QPair>
 #include <QVector>
 
+class QCamera;
+class QCameraDevice;
+class QCameraFormat;
 class QCloseEvent;
 class QComboBox;
 class QJsonObject;
 class QLabel;
 class QLineEdit;
+class QMediaCaptureSession;
 class QPlainTextEdit;
 class QProcess;
 class QPushButton;
 class QTcpSocket;
 class QTimer;
 class QToolButton;
+class QVideoFrame;
+class QVideoSink;
 class QWidget;
 
 // 选手端复用导播台全屏 HUD，只在同一窗口上叠加登记和视频源控制层。
@@ -71,7 +77,9 @@ private:
     void startVideoPreview();
     void stopVideoPreview();
     void scheduleVideoRestart();
-    void consumeVideoOutput();
+    void startStreaming();
+    void stopStreaming();
+    void onCameraFrame(const QVideoFrame &frame);
     void showFramePreview(const QImage &frame);
     QString ffmpegExecutable() const;
     QString selectedSourceId(const QComboBox *combo) const;
@@ -83,9 +91,11 @@ private:
     QTcpSocket *m_socket = nullptr;
     QTimer *m_loginTimeoutTimer = nullptr;
     QTimer *m_videoRestartTimer = nullptr;
-    QProcess *m_videoProcess = nullptr;
+    QCamera *m_camera = nullptr;
+    QMediaCaptureSession *m_captureSession = nullptr;
+    QVideoSink *m_videoSink = nullptr;
+    QProcess *m_streamProcess = nullptr;
     QByteArray m_readBuffer;
-    QByteArray m_videoBuffer;
     QImage m_lastVideoFrame;
     QVector<QPair<QString, QString>> m_videoDevices;
     bool m_registered = false;

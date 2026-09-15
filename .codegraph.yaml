@@ -1,0 +1,19 @@
+# CodeGraph project configuration
+# Docs: https://github.com/whenyoung/codegraph
+version: "1.0"
+
+# Tooling preset: minimal | balanced | full | security-focused
+preset: balanced
+
+performance:
+  # This repo has no dedicated test tree; keep tests excluded so Qt UI sources
+  # dominate the index.
+  exclude_tests: true
+
+# Human-readable annotations for important directories so CodeGraph can
+# attach project context when answering queries.
+contexts:
+  "Assets/":            "Static broadcast assets and settlement animations"
+  "tools/":             "Bundled FFmpeg binaries (ffmpeg.exe / ffprobe.exe)"
+  "build/":             "CMake build output - generated, do not index"
+  "":                   "Qt/C++ sources for match server, client and robot simulator"

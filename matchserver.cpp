@@ -23,8 +23,9 @@ namespace {
 constexpr quint8 kDefaultRobotId = 1;
 constexpr quint8 kRedTeam = 1;
 constexpr quint8 kBlueTeam = 2;
-constexpr int kVideoWidth = 960;
-constexpr int kVideoHeight = 540;
+// Keep the transport bounded: the GUI always renders only the newest frame.
+constexpr int kVideoWidth = 640;
+constexpr int kVideoHeight = 360;
 constexpr int kVideoBytesPerFrame = kVideoWidth * kVideoHeight * 4;
 
 QString teamName(quint8 team)
@@ -180,8 +181,12 @@ void MatchServer::onVideoReadyRead(quint8 team)
     if (!socket)
         return;
 
+    // Bound the work we do per event-loop turn. At 3.5 Mbps / 1316-byte TS
+    // packets the socket can refill faster than we drain it; without a cap a
+    // saturated stream starves the GUI.
     QProcess *decoder = m_videoDecoders.value(team);
-    while (socket->hasPendingDatagrams()) {
+    int iterations = 0;
+    while (socket->hasPendingDatagrams() && iterations++ < 64) {
         const QNetworkDatagram datagram = socket->receiveDatagram();
         if (datagram.data().isEmpty())
             continue;
@@ -189,10 +194,22 @@ void MatchServer::onVideoReadyRead(quint8 team)
             startVideoDecoder(team);
             decoder = m_videoDecoders.value(team);
         }
-        if (decoder && decoder->state() != QProcess::NotRunning
-            && decoder->bytesToWrite() < 2 * 1024 * 1024) {
-            decoder->write(datagram.data());
+        if (!decoder || decoder->state() == QProcess::NotRunning)
+            continue;
+
+        // Back-pressure: if ffmpeg is slow to consume, prefer dropping whole
+        // packets at once rather than dribbling bytes into a full pipe. TS
+        // packets are self-contained 188-byte cells so we can discard any
+        // prefix safely — the decoder will resync at the next sync byte.
+        if (decoder->bytesToWrite() >= 512 * 1024) {
+            // Decoder is >0.5MB behind. Drop the backlog to the most recent
+            // ~64KB so we recover at the next GOP instead of smearing stale
+            // P-frames across the stream.
+            const QByteArray pending = socket->readAll();
+            Q_UNUSED(pending);
+            break;
         }
+        decoder->write(datagram.data());
     }
 }
 
@@ -235,6 +252,9 @@ void MatchServer::startVideoDecoder(quint8 team)
         decoder->deleteLater();
     });
 
+    // Drop any half-written frame a previous attempt may have left behind so
+    // the first consumeVideoOutput call sees a clean stream boundary.
+    m_videoBuffers.remove(team);
     decoder->start(executable, {
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("error"),
@@ -246,7 +266,7 @@ void MatchServer::startVideoDecoder(quint8 team)
         QStringLiteral("-f"), QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
         QStringLiteral("-s"), QStringLiteral("%1x%2").arg(kVideoWidth).arg(kVideoHeight),
-        QStringLiteral("-r"), QStringLiteral("30"),
+        QStringLiteral("-r"), QStringLiteral("20"),
         QStringLiteral("pipe:1")
     });
 }
@@ -272,18 +292,35 @@ void MatchServer::consumeVideoOutput(quint8 team)
 
     QByteArray &buffer = m_videoBuffers[team];
     buffer.append(decoder->readAllStandardOutput());
-    while (buffer.size() >= kVideoBytesPerFrame) {
-        const QByteArray frameBytes = buffer.left(kVideoBytesPerFrame);
-        buffer.remove(0, kVideoBytesPerFrame);
-        const QImage frame(reinterpret_cast<const uchar *>(frameBytes.constData()),
-                           kVideoWidth, kVideoHeight, QImage::Format_ARGB32);
-        QString sourceId;
-        QTcpSocket *sessionSocket = m_teamSessions.value(team);
-        const auto session = m_sessions.constFind(sessionSocket);
-        if (session != m_sessions.constEnd())
-            sourceId = session->sourceId;
-        if (!sourceId.isEmpty())
-            emit videoFrameReceived(sourceId, frame.copy());
+    // The UI only needs the newest frame. Keep a bounded number of complete
+    // frames so a slow consumer cannot turn decoder output into latency.
+    const int maxBufferedBytes = kVideoBytesPerFrame * 3;
+    if (buffer.size() > maxBufferedBytes) {
+        int bytesToDrop = buffer.size() - maxBufferedBytes;
+        bytesToDrop -= bytesToDrop % kVideoBytesPerFrame;
+        if (bytesToDrop > 0)
+            buffer.remove(0, bytesToDrop);
+    }
+
+    const int completeBytes = (buffer.size() / kVideoBytesPerFrame) * kVideoBytesPerFrame;
+    if (completeBytes <= 0)
+        return;
+
+    const QByteArray frameBytes = buffer.mid(completeBytes - kVideoBytesPerFrame,
+                                             kVideoBytesPerFrame);
+    buffer.remove(0, completeBytes);
+    const QImage latestFrame(reinterpret_cast<const uchar *>(frameBytes.constData()),
+                             kVideoWidth, kVideoHeight, QImage::Format_ARGB32);
+
+    QString sourceId;
+    QTcpSocket *sessionSocket = m_teamSessions.value(team);
+    const auto session = m_sessions.constFind(sessionSocket);
+    if (session != m_sessions.constEnd())
+        sourceId = session->sourceId;
+    if (!sourceId.isEmpty()) {
+        // latestFrame is a non-owning view over frameBytes. Detach before the
+        // receiver can retain the image after this function returns.
+        emit videoFrameReceived(sourceId, latestFrame.copy());
     }
 }
 

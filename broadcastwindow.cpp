@@ -2,7 +2,11 @@
 
 #include <QCloseEvent>
 #include <QColor>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
 #include <QEasingCurve>
+#include <QFileInfo>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
@@ -11,16 +15,20 @@
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
+#include <QLayoutItem>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QProgressBar>
 #include <QPropertyAnimation>
+#include <QProcess>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
 #include <QShowEvent>
 #include <QSizePolicy>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QVBoxLayout>
@@ -116,8 +124,19 @@ constexpr int kMaxHp = 5000;
 constexpr int kMaxHeat = 1000;
 constexpr int kCenterHudWidth = 786;
 constexpr int kCenterHudHeight = 225;
+constexpr int kTeamHudWidth = 420;
+constexpr int kTeamHudHeight = 199;
+constexpr int kHudGap = 18;
+constexpr int kCenterHudNativeYOffset = -34;
+constexpr int kCenterTimerY = 40;
+constexpr int kMatchTitleNativeYOffset = -15;
+constexpr int kSettlementFrameWidth = 960;
+constexpr int kSettlementFrameHeight = 540;
+constexpr int kSettlementFrameBytes = kSettlementFrameWidth * kSettlementFrameHeight * 4;
+constexpr int kSettlementFrameIntervalMs = 40;
+constexpr int kSettlementFrameQueueLimit = 8;
 
-QPoint defaultLayoutOffset(const QString &elementId)
+QPoint legacyLayoutOffset(const QString &elementId)
 {
     if (elementId == QStringLiteral("center_hud"))
         return QPoint(0, -40);
@@ -129,6 +148,22 @@ QPoint defaultLayoutOffset(const QString &elementId)
         return QPoint(0, -12);
     if (elementId == QStringLiteral("match_timer"))
         return QPoint(0, -50);
+    return QPoint();
+}
+
+QPoint defaultLayoutOffset(const QString &elementId)
+{
+    // These values used to be applied with QWidget::move().  They are now
+    // part of the stable layout geometry below, so a fresh layout starts at
+    // the native coordinates instead of carrying hidden runtime offsets.
+    if (elementId == QStringLiteral("center_hud"))
+        return QPoint(0, 30);
+    if (elementId == QStringLiteral("left_score_panel"))
+        return QPoint(60, 20);
+    if (elementId == QStringLiteral("right_score_panel"))
+        return QPoint(-60, 20);
+    if (elementId == QStringLiteral("match_title"))
+        return QPoint(0, kMatchTitleNativeYOffset);
     return QPoint();
 }
 
@@ -280,36 +315,10 @@ private:
     int m_damageBufferValue = -1;
 };
 
-class AtlasPixmapLayer final : public QWidget
+class CenterHudCanvas final : public QWidget
 {
 public:
-    AtlasPixmapLayer(const QPixmap &pixmap, QWidget *parent = nullptr)
-        : QWidget(parent), m_pixmap(pixmap)
-    {
-        setAttribute(Qt::WA_TranslucentBackground);
-        setAttribute(Qt::WA_NoSystemBackground);
-        setAttribute(Qt::WA_TransparentForMouseEvents);
-        setAutoFillBackground(false);
-    }
-
-    QSize sizeHint() const override { return m_pixmap.size(); }
-
-protected:
-    void paintEvent(QPaintEvent *) override
-    {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        painter.drawPixmap(rect(), m_pixmap);
-    }
-
-private:
-    QPixmap m_pixmap;
-};
-
-class AtlasCenterHud final : public QWidget
-{
-public:
-    explicit AtlasCenterHud(QWidget *parent = nullptr)
+    explicit CenterHudCanvas(QWidget *parent = nullptr)
         : QWidget(parent),
           m_n15(assetCrop(QStringLiteral(":/broadcast/notepad_atlas.png"),
                           QRect(7, 156, 400, 94))),
@@ -324,15 +333,19 @@ public:
         setMinimumSize(1, 1);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
-        m_panelLayer = new AtlasPixmapLayer(
-            m_n15.scaled(QSize(600, 141), Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
-            this);
-        m_leftBadgeLayer = new AtlasPixmapLayer(
-            m_n16Left.scaled(QSize(123, 93), Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
-            this);
-        m_rightBadgeLayer = new AtlasPixmapLayer(
-            m_n16Right.scaled(QSize(123, 92), Qt::IgnoreAspectRatio, Qt::SmoothTransformation),
-            this);
+        // The three atlas pieces are painted by this widget as one composition.
+        // The score-panel widgets below are transparent geometry proxies only;
+        // they carry the score labels without being able to replace or reorder
+        // the N15/N16 artwork.
+        m_leftBadgeLayer = new QWidget(this);
+        m_rightBadgeLayer = new QWidget(this);
+        for (QWidget *panel : {m_leftBadgeLayer, m_rightBadgeLayer}) {
+            panel->setAttribute(Qt::WA_TranslucentBackground);
+            panel->setAttribute(Qt::WA_NoSystemBackground);
+            panel->setAttribute(Qt::WA_TransparentForMouseEvents);
+            panel->setAutoFillBackground(false);
+            panel->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+        }
 
         m_content = new QWidget(this);
         m_content->setAttribute(Qt::WA_TranslucentBackground);
@@ -353,13 +366,6 @@ public:
             (*label)->setAttribute(Qt::WA_TransparentForMouseEvents);
         }
 
-        auto *leftScoreLayout = new QVBoxLayout(m_leftBadgeLayer);
-        leftScoreLayout->setContentsMargins(0, 0, 0, 0);
-        leftScoreLayout->addWidget(m_leftScore, 1);
-
-        auto *rightScoreLayout = new QVBoxLayout(m_rightBadgeLayer);
-        rightScoreLayout->setContentsMargins(0, 0, 0, 0);
-        rightScoreLayout->addWidget(m_rightScore, 1);
     }
 
     QSize sizeHint() const override { return QSize(kCenterHudWidth, kCenterHudHeight); }
@@ -370,8 +376,52 @@ public:
     QWidget *leftScorePanel() const { return m_leftBadgeLayer; }
     QWidget *rightScorePanel() const { return m_rightBadgeLayer; }
 
+    void setElementOffset(const QString &elementId, const QPoint &offset)
+    {
+        m_elementOffsets.insert(elementId, offset);
+        updateElementGeometry();
+    }
+
+    void setElementSize(const QString &elementId, const QSize &size)
+    {
+        if (size.isValid() && size.width() > 0 && size.height() > 0)
+            m_elementSizes.insert(elementId, size);
+        else
+            m_elementSizes.remove(elementId);
+        updateElementGeometry();
+    }
+
 protected:
     void resizeEvent(QResizeEvent *event) override
+    {
+        updateElementGeometry();
+        QWidget::resizeEvent(event);
+    }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+        // Paint order is the contract of this HUD: N15 is the timer base and
+        // both N16 score boards are painted on top of it.
+        if (!m_n15.isNull())
+            painter.drawPixmap(m_panelRect, m_n15);
+        if (!m_n16Left.isNull())
+            painter.drawPixmap(m_leftBadgeRect, m_n16Left);
+        if (!m_n16Right.isNull())
+            painter.drawPixmap(m_rightBadgeRect, m_n16Right);
+    }
+
+private:
+    QRect elementGeometry(const QString &elementId, const QRect &baseGeometry) const
+    {
+        const QSize size = m_elementSizes.value(elementId, baseGeometry.size());
+        const QPoint offset = m_elementOffsets.value(elementId, QPoint());
+        return QRect(baseGeometry.topLeft() + offset, size);
+    }
+
+    void updateElementGeometry()
     {
         const qreal scaleX = qMax<qreal>(0.01, width() / qreal(kCenterHudWidth));
         const qreal scaleY = qMax<qreal>(0.01, height() / qreal(kCenterHudHeight));
@@ -381,38 +431,49 @@ protected:
         const int leftBadgeHeight = qMax(1, qRound(93 * scaleY));
         const int rightBadgeHeight = qMax(1, qRound(92 * scaleY));
         const int overlap = qMax(0, qRound(30 * scaleX));
-        const int compositionWidth = badgeWidth + panelWidth + badgeWidth - overlap * 2;
-
-        const int compositionLeft = qMax(0, (width() - compositionWidth) / 2);
-        const int panelLeft = compositionLeft + badgeWidth - overlap;
-        const int panelTop = qMax(0, (height() - panelHeight) / 2);
-        const int leftBadgeTop = qMax(0, (height() - leftBadgeHeight) / 2);
-        const int rightBadgeTop = qMax(0, (height() - rightBadgeHeight) / 2);
+        // The center HUD is the sole coordinate reference for the score
+        // badges.  Do not derive their position from the outer window: that
+        // made the result change when the surrounding layout was resized.
+        const int panelLeft = qMax(0, (width() - panelWidth) / 2);
+        const int leftBadgeOuterAnchor = panelLeft - badgeWidth + overlap;
+        const int rightBadgeOuterAnchor = panelLeft + panelWidth - overlap;
+        // The authored center HUD starts at the top of this local coordinate
+        // system. The title may occupy the signed space above the panel, but
+        // the artwork itself must not move when a label changes text.
+        const int panelTop = 0;
+        const int leftBadgeTop = qMax(0, qRound(10 * scaleY));
+        const int rightBadgeTop = qMax(0, qRound(10 * scaleY));
 
         m_panelRect = QRect(panelLeft, panelTop, panelWidth, panelHeight);
-        m_leftBadgeRect = QRect(compositionLeft, leftBadgeTop, badgeWidth, leftBadgeHeight);
-        m_rightBadgeRect = QRect(panelLeft + panelWidth - overlap,
-                                 rightBadgeTop,
-                                 badgeWidth,
-                                 rightBadgeHeight);
+        // The authored N16 positions are the outer anchors. Their final
+        // positions come exclusively from layout offsets (60/-60, 20 by
+        // default), so the layout file describes the actual requested move.
+        const QRect leftBadgeBase(leftBadgeOuterAnchor,
+                                  leftBadgeTop,
+                                  badgeWidth,
+                                  leftBadgeHeight);
+        const QRect rightBadgeBase(rightBadgeOuterAnchor,
+                                   rightBadgeTop,
+                                   badgeWidth,
+                                   rightBadgeHeight);
+        m_leftBadgeRect = elementGeometry(QStringLiteral("left_score_panel"),
+                                           leftBadgeBase);
+        m_rightBadgeRect = elementGeometry(QStringLiteral("right_score_panel"),
+                                            rightBadgeBase);
 
-        m_panelLayer->setGeometry(m_panelRect);
         m_leftBadgeLayer->setGeometry(m_leftBadgeRect);
         m_rightBadgeLayer->setGeometry(m_rightBadgeRect);
-        const int contentSide = qRound(66 * scaleX);
-        const int contentTop = qRound(42 * scaleY);
-        m_content->setGeometry(m_panelRect.adjusted(contentSide,
-                                                     -contentTop,
-                                                     -contentSide,
-                                                     contentTop));
-        QWidget::resizeEvent(event);
+        m_leftScore->setGeometry(QRect(QPoint(), m_leftBadgeLayer->size()));
+        m_rightScore->setGeometry(QRect(QPoint(), m_rightBadgeLayer->size()));
+        // Content is a full-size local canvas. Title and timer now use
+        // positions relative to the center artwork, never a global offset.
+        m_content->setGeometry(0, 0, width(), height());
+        m_content->raise();
     }
 
-private:
     QPixmap m_n15;
     QPixmap m_n16Left;
     QPixmap m_n16Right;
-    QWidget *m_panelLayer = nullptr;
     QWidget *m_leftBadgeLayer = nullptr;
     QWidget *m_rightBadgeLayer = nullptr;
     QWidget *m_content = nullptr;
@@ -421,6 +482,455 @@ private:
     QRect m_panelRect;
     QRect m_leftBadgeRect;
     QRect m_rightBadgeRect;
+    QHash<QString, QPoint> m_elementOffsets;
+    QHash<QString, QSize> m_elementSizes;
+};
+
+class HudElementLayout : public QLayout
+{
+public:
+    explicit HudElementLayout(QWidget *parent = nullptr)
+        : QLayout(parent)
+    {
+        setContentsMargins(0, 0, 0, 0);
+    }
+
+    ~HudElementLayout() override
+    {
+        while (QLayoutItem *item = takeAt(0))
+            delete item;
+    }
+
+    void addElement(const QString &elementId, QWidget *widget)
+    {
+        if (elementId.isEmpty() || !widget)
+            return;
+
+        addChildWidget(widget);
+        m_entries.append({elementId, new QWidgetItem(widget)});
+        invalidate();
+    }
+
+    void addItem(QLayoutItem *item) override
+    {
+        if (!item)
+            return;
+        m_entries.append({QString(), item});
+        invalidate();
+    }
+
+    void setElementOffset(const QString &elementId, const QPoint &offset)
+    {
+        m_offsets.insert(elementId, offset);
+        invalidate();
+    }
+
+    void setElementSize(const QString &elementId, const QSize &size)
+    {
+        if (size.isValid() && size.width() > 0 && size.height() > 0)
+            m_sizes.insert(elementId, size);
+        else
+            m_sizes.remove(elementId);
+        invalidate();
+    }
+
+    bool hasElementSize(const QString &elementId) const
+    {
+        return m_sizes.contains(elementId);
+    }
+
+    QLayoutItem *itemAt(int index) const override
+    {
+        return index >= 0 && index < m_entries.size() ? m_entries.at(index).item : nullptr;
+    }
+
+    QLayoutItem *takeAt(int index) override
+    {
+        if (index < 0 || index >= m_entries.size())
+            return nullptr;
+
+        const Entry entry = m_entries.takeAt(index);
+        m_offsets.remove(entry.elementId);
+        m_sizes.remove(entry.elementId);
+        return entry.item;
+    }
+
+    int count() const override { return m_entries.size(); }
+
+protected:
+    struct Entry {
+        QString elementId;
+        QLayoutItem *item = nullptr;
+    };
+
+    const Entry *entry(const QString &elementId) const
+    {
+        for (const Entry &candidate : m_entries) {
+            if (candidate.elementId == elementId)
+                return &candidate;
+        }
+        return nullptr;
+    }
+
+    QSize naturalSize(const QString &elementId) const
+    {
+        const Entry *candidate = entry(elementId);
+        if (!candidate || !candidate->item)
+            return QSize(1, 1);
+
+        const QSize hint = candidate->item->sizeHint();
+        const QSize minimum = candidate->item->minimumSize();
+        return QSize(qMax(1, qMax(hint.width(), minimum.width())),
+                     qMax(1, qMax(hint.height(), minimum.height())));
+    }
+
+    QSize minimumElementSize(const QString &elementId) const
+    {
+        const Entry *candidate = entry(elementId);
+        if (!candidate || !candidate->item)
+            return QSize(1, 1);
+        const QSize minimum = candidate->item->minimumSize();
+        return QSize(qMax(1, minimum.width()), qMax(1, minimum.height()));
+    }
+
+    QSize elementSize(const QString &elementId) const
+    {
+        return m_sizes.contains(elementId) ? m_sizes.value(elementId)
+                                            : naturalSize(elementId);
+    }
+
+    QPoint elementOffset(const QString &elementId) const
+    {
+        return m_offsets.value(elementId, QPoint());
+    }
+
+    void setItemGeometry(const QString &elementId, const QRect &geometry)
+    {
+        const Entry *candidate = entry(elementId);
+        if (!candidate || !candidate->item)
+            return;
+
+        // QWidgetItem clamps an item to the layout rect.  The original HUD
+        // deliberately lets the center artwork extend above that rect, so
+        // set the child geometry directly and retain the signed coordinates.
+        if (QWidget *widget = candidate->item->widget())
+            widget->setGeometry(geometry);
+        else
+            candidate->item->setGeometry(geometry);
+    }
+
+private:
+    QVector<Entry> m_entries;
+    QHash<QString, QPoint> m_offsets;
+    QHash<QString, QSize> m_sizes;
+};
+
+class HudTopLayout final : public HudElementLayout
+{
+public:
+    explicit HudTopLayout(QWidget *parent = nullptr)
+        : HudElementLayout(parent)
+    {
+    }
+
+    QSize sizeHint() const override
+    {
+        const QSize red = elementSize(QStringLiteral("red_team_panel"));
+        const QSize center = elementSize(QStringLiteral("center_hud"));
+        const QSize blue = elementSize(QStringLiteral("blue_team_panel"));
+        return QSize(red.width() + center.width() + blue.width() + kHudGap * 2,
+                     qMax(red.height(), qMax(center.height(), blue.height())));
+    }
+
+    QSize minimumSize() const override
+    {
+        const QSize red = hasElementSize(QStringLiteral("red_team_panel"))
+                              ? elementSize(QStringLiteral("red_team_panel"))
+                              : minimumElementSize(QStringLiteral("red_team_panel"));
+        const QSize center = hasElementSize(QStringLiteral("center_hud"))
+                                 ? elementSize(QStringLiteral("center_hud"))
+                                 : minimumElementSize(QStringLiteral("center_hud"));
+        const QSize blue = hasElementSize(QStringLiteral("blue_team_panel"))
+                               ? elementSize(QStringLiteral("blue_team_panel"))
+                               : minimumElementSize(QStringLiteral("blue_team_panel"));
+        return QSize(red.width() + center.width() + blue.width() + kHudGap * 2,
+                     qMax(red.height(), qMax(center.height(), blue.height())));
+    }
+
+    Qt::Orientations expandingDirections() const override { return Qt::Horizontal; }
+
+protected:
+    void setGeometry(const QRect &rect) override
+    {
+        QLayout::setGeometry(rect);
+
+        const QString redId = QStringLiteral("red_team_panel");
+        const QString centerId = QStringLiteral("center_hud");
+        const QString blueId = QStringLiteral("blue_team_panel");
+        QSize center = elementSize(centerId);
+        const QSize redNatural = naturalSize(redId);
+        const QSize blueNatural = naturalSize(blueId);
+        QSize redSize = hasElementSize(redId)
+                            ? elementSize(redId)
+                            : QSize(kTeamHudWidth, qMax(kTeamHudHeight, redNatural.height()));
+        QSize blueSize = hasElementSize(blueId)
+                             ? elementSize(blueId)
+                             : QSize(kTeamHudWidth, qMax(kTeamHudHeight, blueNatural.height()));
+        int gap = kHudGap;
+
+        // The reference HUD is authored for a wide output. Scale the complete
+        // three-part header when the actual output is narrower, so the center
+        // artwork remains centered and the team panels stay on-screen.
+        const bool hasCustomSize = hasElementSize(redId) || hasElementSize(centerId)
+                                   || hasElementSize(blueId);
+        const int preferredWidth = kTeamHudWidth * 2 + kCenterHudWidth + kHudGap * 2;
+        if (!hasCustomSize && rect.width() < preferredWidth) {
+            const qreal scale = qBound<qreal>(0.01,
+                                              rect.width() / qreal(preferredWidth),
+                                              1.0);
+            redSize = QSize(qMax(1, qRound(kTeamHudWidth * scale)),
+                            qMax(1, qRound(kTeamHudHeight * scale)));
+            blueSize = QSize(qMax(1, qRound(kTeamHudWidth * scale)),
+                             qMax(1, qRound(kTeamHudHeight * scale)));
+            center.setWidth(qMax(1, qRound(kCenterHudWidth * scale)));
+            gap = qMax(2, qRound(kHudGap * scale));
+        }
+
+        // The center HUD remains centered, while the default team panels use
+        // all space on their respective sides. Use the overlay's full width
+        // here so the top panels reach the window edges even though the rest
+        // of the overlay keeps its authored horizontal margins.
+        const QRect horizontalBounds = parentWidget() ? parentWidget()->contentsRect() : rect;
+        const int leftEdge = horizontalBounds.x();
+        const int rightEdge = horizontalBounds.x() + horizontalBounds.width();
+        const int centerLeft = leftEdge + (horizontalBounds.width() - center.width()) / 2;
+
+        if (!hasElementSize(redId))
+            redSize.setWidth(qMax(1, centerLeft - gap - leftEdge));
+        if (!hasElementSize(blueId))
+            blueSize.setWidth(qMax(1, rightEdge - (centerLeft + center.width() + gap)));
+
+        const QPoint redOffset = elementOffset(redId);
+        const QPoint centerOffset = elementOffset(centerId);
+        const QPoint blueOffset = elementOffset(blueId);
+        setItemGeometry(redId,
+                        QRect(leftEdge + redOffset.x(),
+                              rect.y() + redOffset.y(),
+                              redSize.width(),
+                              redSize.height()));
+        setItemGeometry(centerId,
+                        QRect(centerLeft + centerOffset.x(),
+                              rect.y() + kCenterHudNativeYOffset + centerOffset.y(),
+                              center.width(),
+                              center.height()));
+        setItemGeometry(blueId,
+                        QRect(centerLeft + center.width() + gap + blueOffset.x(),
+                              rect.y() + blueOffset.y(),
+                              blueSize.width(),
+                              blueSize.height()));
+    }
+};
+
+class HudCenterContentLayout final : public HudElementLayout
+{
+public:
+    explicit HudCenterContentLayout(QWidget *parent = nullptr)
+        : HudElementLayout(parent)
+    {
+    }
+
+    QSize sizeHint() const override
+    {
+        const QSize title = elementSize(QStringLiteral("match_title"));
+        const QSize timer = elementSize(QStringLiteral("match_timer"));
+        return QSize(qMax(title.width(), timer.width()), title.height() + timer.height() + 2);
+    }
+
+    QSize minimumSize() const override { return sizeHint(); }
+
+protected:
+    void setGeometry(const QRect &rect) override
+    {
+        QLayout::setGeometry(rect);
+
+        const QString titleId = QStringLiteral("match_title");
+        const QString timerId = QStringLiteral("match_timer");
+        const QSize title = elementSize(titleId);
+        const QSize timer = elementSize(timerId);
+        const int titleWidth = hasElementSize(titleId) ? title.width() : rect.width();
+        const int timerWidth = hasElementSize(timerId) ? timer.width() : rect.width();
+        // Title and timer use fixed anchors in the center HUD coordinate
+        // system. Their positions must not depend on the other label's text
+        // metrics.
+        const qreal scaleX = rect.width() / qreal(kCenterHudWidth);
+        const qreal scaleY = rect.height() / qreal(kCenterHudHeight);
+        const auto scaledOffset = [scaleX, scaleY](const QPoint &offset) {
+            return QPoint(qRound(offset.x() * scaleX), qRound(offset.y() * scaleY));
+        };
+        const QPoint titleOffset = scaledOffset(elementOffset(titleId));
+        const QPoint timerOffset = scaledOffset(elementOffset(timerId));
+
+        // The title is a child of centerHud, so a negative Y would place it
+        // outside the parent's paint region and clip the glyphs. Keep the
+        // requested offset when it is visible, but clamp its top edge.
+        const int titleY = qMax(rect.y(), rect.y() + titleOffset.y());
+        setItemGeometry(titleId,
+                        QRect(rect.x() + titleOffset.x(),
+                              titleY,
+                              titleWidth,
+                              title.height()));
+        setItemGeometry(timerId,
+                        QRect(rect.x() + timerOffset.x(),
+                              rect.y() + qRound(kCenterTimerY * scaleY)
+                                  + timerOffset.y(),
+                              timerWidth,
+                              timer.height()));
+    }
+};
+
+class HudBottomLayout final : public HudElementLayout
+{
+public:
+    explicit HudBottomLayout(QWidget *parent = nullptr)
+        : HudElementLayout(parent)
+    {
+    }
+
+    QSize sizeHint() const override
+    {
+        const QSize state = elementSize(QStringLiteral("match_state"));
+        const QSize source = elementSize(QStringLiteral("source_label"));
+        return QSize(state.width() + source.width(), qMax(state.height(), source.height()));
+    }
+
+    QSize minimumSize() const override { return sizeHint(); }
+
+    Qt::Orientations expandingDirections() const override { return Qt::Horizontal; }
+
+protected:
+    void setGeometry(const QRect &rect) override
+    {
+        QLayout::setGeometry(rect);
+
+        const QString stateId = QStringLiteral("match_state");
+        const QString sourceId = QStringLiteral("source_label");
+        const QSize state = elementSize(stateId);
+        const QSize source = elementSize(sourceId);
+        const QPoint stateOffset = elementOffset(stateId);
+        const QPoint sourceOffset = elementOffset(sourceId);
+        const int bottom = rect.y() + rect.height();
+
+        setItemGeometry(stateId,
+                        QRect(rect.x() + stateOffset.x(),
+                              bottom - state.height() + stateOffset.y(),
+                              state.width(),
+                              state.height()));
+        setItemGeometry(sourceId,
+                        QRect(rect.x() + rect.width() - source.width() + sourceOffset.x(),
+                              bottom - source.height() + sourceOffset.y(),
+                              source.width(),
+                              source.height()));
+    }
+};
+
+// Team panels use authored row coordinates. A flow layout redistributes rows
+// whenever a label's text changes, which is exactly the y-drift visible when
+// the match starts or a robot changes connection state.
+class HudTeamLayout final : public QLayout
+{
+public:
+    explicit HudTeamLayout(QWidget *parent = nullptr)
+        : QLayout(parent)
+    {
+        setContentsMargins(0, 0, 0, 0);
+    }
+
+    ~HudTeamLayout() override
+    {
+        while (QLayoutItem *item = takeAt(0))
+            delete item;
+    }
+
+    void addElement(const QString &elementId, QWidget *widget)
+    {
+        if (elementId.isEmpty() || !widget)
+            return;
+        addChildWidget(widget);
+        m_entries.append({elementId, new QWidgetItem(widget)});
+        invalidate();
+    }
+
+    void addItem(QLayoutItem *item) override
+    {
+        if (!item)
+            return;
+        m_entries.append({QString(), item});
+        invalidate();
+    }
+
+    QLayoutItem *itemAt(int index) const override
+    {
+        return index >= 0 && index < m_entries.size() ? m_entries.at(index).item : nullptr;
+    }
+
+    QLayoutItem *takeAt(int index) override
+    {
+        if (index < 0 || index >= m_entries.size())
+            return nullptr;
+        return m_entries.takeAt(index).item;
+    }
+
+    int count() const override { return m_entries.size(); }
+    QSize sizeHint() const override { return QSize(kTeamHudWidth, kTeamHudHeight); }
+    QSize minimumSize() const override { return sizeHint(); }
+
+protected:
+    void setGeometry(const QRect &rect) override
+    {
+        QLayout::setGeometry(rect);
+        const qreal scaleX = qMax<qreal>(0.01, rect.width() / qreal(kTeamHudWidth));
+        const qreal scaleY = qMax<qreal>(0.01, rect.height() / qreal(kTeamHudHeight));
+        const auto scaleRect = [rect, scaleX, scaleY](const QRect &native) {
+            return QRect(rect.x() + qRound(native.x() * scaleX),
+                         rect.y() + qRound(native.y() * scaleY),
+                         qMax(1, qRound(native.width() * scaleX)),
+                         qMax(1, qRound(native.height() * scaleY)));
+        };
+
+        setItemGeometry(QStringLiteral("team_row"), scaleRect(QRect(22, 10, 376, 40)));
+        setItemGeometry(QStringLiteral("card_row"), scaleRect(QRect(22, 39, 376, 26)));
+        setItemGeometry(QStringLiteral("health_bar"), scaleRect(QRect(22, 58, 376, 34)));
+        setItemGeometry(QStringLiteral("heat_bar"), scaleRect(QRect(22, 95, 376, 20)));
+        setItemGeometry(QStringLiteral("status_row"), scaleRect(QRect(22, 122, 376, 28)));
+    }
+
+private:
+    struct Entry {
+        QString elementId;
+        QLayoutItem *item = nullptr;
+    };
+
+    const Entry *entry(const QString &elementId) const
+    {
+        for (const Entry &candidate : m_entries) {
+            if (candidate.elementId == elementId)
+                return &candidate;
+        }
+        return nullptr;
+    }
+
+    void setItemGeometry(const QString &elementId, const QRect &geometry)
+    {
+        const Entry *candidate = entry(elementId);
+        if (!candidate || !candidate->item)
+            return;
+        if (QWidget *widget = candidate->item->widget())
+            widget->setGeometry(geometry);
+        else
+            candidate->item->setGeometry(geometry);
+    }
+
+    QVector<Entry> m_entries;
 };
 } // namespace
 
@@ -440,11 +950,36 @@ BroadcastWindow::BroadcastWindow(QWidget *parent)
         if (m_remainingSeconds > 0)
             --m_remainingSeconds;
 
-        updateTimerDisplay();
         if (m_remainingSeconds == 0) {
-            m_matchTimer->stop();
-            m_matchRunning = false;
-            emit matchStateChanged(false);
+            finishMatch(settlementTypeForScores());
+        } else {
+            updateTimerDisplay();
+        }
+    });
+
+    m_programRenderTimer = new QTimer(this);
+    m_programRenderTimer->setSingleShot(true);
+    m_programRenderTimer->setInterval(33);
+    connect(m_programRenderTimer, &QTimer::timeout,
+            this, &BroadcastWindow::renderProgramFrame);
+
+    m_settlementFrameTimer = new QTimer(this);
+    m_settlementFrameTimer->setInterval(kSettlementFrameIntervalMs);
+    connect(m_settlementFrameTimer, &QTimer::timeout, this, [this] {
+        if (!m_settlementFrames.isEmpty()) {
+            renderSettlementFrame(m_settlementFrames.dequeue());
+        }
+
+        if (m_settlementProcess && m_settlementFrames.size() < kSettlementFrameQueueLimit)
+            consumeSettlementOutput();
+
+        if (m_settlementFinished && m_settlementFrames.isEmpty()
+            && m_settlementBuffer.size() < kSettlementFrameBytes) {
+            m_settlementFrameTimer->stop();
+            QProcess *process = m_settlementProcess;
+            m_settlementProcess = nullptr;
+            if (process)
+                process->deleteLater();
         }
     });
 
@@ -504,33 +1039,30 @@ void BroadcastWindow::buildUi()
     overlayLayout->setContentsMargins(42, 34, 42, 34);
     overlayLayout->setSpacing(0);
 
-    auto *topRow = new QHBoxLayout;
-    topRow->setSpacing(18);
+    auto *topRow = new HudTopLayout;
+    overlayLayout->addLayout(topRow);
 
     RobotOverlay redOverlay;
     auto *redPanel = createRobotOverlay(m_teamNames.value(kRedTeam),
                                         kRedTeam, &redOverlay);
-    topRow->addWidget(redPanel, 1, Qt::AlignTop);
+    topRow->addElement(QStringLiteral("red_team_panel"), redPanel);
     m_overlays.insert(kRedTeam, redOverlay);
     registerLayoutElement(QStringLiteral("red_team_panel"), redPanel);
 
-    auto *centerHud = new AtlasCenterHud(overlay);
+    auto *centerHud = new CenterHudCanvas(overlay);
     auto *centerContent = centerHud->contentWidget();
-    auto *centerLayout = new QVBoxLayout(centerContent);
-    centerLayout->setContentsMargins(0, 0, 0, 0);
-    centerLayout->setSpacing(2);
+    auto *centerLayout = new HudCenterContentLayout;
+    centerContent->setLayout(centerLayout);
 
-    // Keep the labels inside fixed-height layers.  The layers remain owned by
-    // the center layout, while the layout editor moves the layers themselves.
-    // This prevents QLabel::setText() from reflowing a manually positioned
-    // timer when the displayed digits change.
+    // Keep the labels inside fixed-height layers. The custom layout owns their
+    // geometry, so changing the displayed text cannot move either layer.
     auto *titleLayer = new QWidget(centerContent);
     titleLayer->setObjectName(QStringLiteral("matchTitleLayer"));
     titleLayer->setAttribute(Qt::WA_TranslucentBackground);
     titleLayer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
     m_matchTitle = makeLabel(titleLayer, Qt::AlignCenter);
-    m_matchTitle->setText(tr("1v1 步兵对抗赛"));
+    m_matchTitle->setText(tr("1v1 对抗赛 · 1v1 Соревнование"));
     QFont titleFont = m_matchTitle->font();
     titleFont.setBold(true);
     titleFont.setPointSize(18);
@@ -539,7 +1071,7 @@ void BroadcastWindow::buildUi()
     auto *titleLayerLayout = new QVBoxLayout(titleLayer);
     titleLayerLayout->setContentsMargins(0, 0, 0, 0);
     titleLayerLayout->addWidget(m_matchTitle);
-    centerLayout->addWidget(titleLayer);
+    centerLayout->addElement(QStringLiteral("match_title"), titleLayer);
 
     auto *timerLayer = new QWidget(centerContent);
     timerLayer->setObjectName(QStringLiteral("matchTimerLayer"));
@@ -552,14 +1084,16 @@ void BroadcastWindow::buildUi()
     timerFont.setBold(true);
     timerFont.setPointSize(47);
     m_timerLabel->setFont(timerFont);
-    timerLayer->setFixedHeight(QFontMetrics(timerFont).height());
+    const int timerHeight = QFontMetrics(timerFont).height();
+    m_timerLabel->setFixedHeight(timerHeight);
+    timerLayer->setFixedHeight(timerHeight);
     auto *timerLayerLayout = new QVBoxLayout(timerLayer);
     timerLayerLayout->setContentsMargins(0, 0, 0, 0);
-    timerLayerLayout->addWidget(m_timerLabel);
-    centerLayout->addWidget(timerLayer);
+    timerLayerLayout->addWidget(m_timerLabel, 0, Qt::AlignCenter);
+    centerLayout->addElement(QStringLiteral("match_timer"), timerLayer);
     m_redRoundScoreLabel = centerHud->leftScoreLabel();
     m_blueRoundScoreLabel = centerHud->rightScoreLabel();
-    topRow->addWidget(centerHud, 0, Qt::AlignTop);
+    topRow->addElement(QStringLiteral("center_hud"), centerHud);
     registerLayoutElement(QStringLiteral("center_hud"), centerHud);
     registerLayoutElement(QStringLiteral("left_score_panel"), centerHud->leftScorePanel());
     registerLayoutElement(QStringLiteral("right_score_panel"), centerHud->rightScorePanel());
@@ -571,31 +1105,36 @@ void BroadcastWindow::buildUi()
     RobotOverlay blueOverlay;
     auto *bluePanel = createRobotOverlay(m_teamNames.value(kBlueTeam),
                                          kBlueTeam, &blueOverlay);
-    topRow->addWidget(bluePanel, 1, Qt::AlignTop);
+    topRow->addElement(QStringLiteral("blue_team_panel"), bluePanel);
     m_overlays.insert(kBlueTeam, blueOverlay);
     registerLayoutElement(QStringLiteral("blue_team_panel"), bluePanel);
-    overlayLayout->addLayout(topRow);
-
     overlayLayout->addStretch(1);
 
-    auto *bottomRow = new QHBoxLayout;
+    auto *bottomRow = new HudBottomLayout;
+    overlayLayout->addLayout(bottomRow);
     m_matchState = makeLabel(overlay, Qt::AlignLeft | Qt::AlignVCenter);
     m_matchState->setObjectName(QStringLiteral("matchState"));
     QFont stateFont = m_matchState->font();
     stateFont.setPointSize(20);
     m_matchState->setFont(stateFont);
-    bottomRow->addWidget(m_matchState, 0, Qt::AlignLeft | Qt::AlignBottom);
-    bottomRow->addStretch(1);
+    bottomRow->addElement(QStringLiteral("match_state"), m_matchState);
     m_sourceLabel = makeLabel(overlay, Qt::AlignRight | Qt::AlignVCenter);
     m_sourceLabel->setObjectName(QStringLiteral("sourceLabel"));
     QFont sourceFont = m_sourceLabel->font();
     sourceFont.setPointSize(20);
     sourceFont.setBold(true);
     m_sourceLabel->setFont(sourceFont);
-    bottomRow->addWidget(m_sourceLabel, 0, Qt::AlignRight | Qt::AlignBottom);
-    overlayLayout->addLayout(bottomRow);
+    bottomRow->addElement(QStringLiteral("source_label"), m_sourceLabel);
     registerLayoutElement(QStringLiteral("match_state"), m_matchState);
     registerLayoutElement(QStringLiteral("source_label"), m_sourceLabel);
+
+    m_layoutManagers.insert(QStringLiteral("red_team_panel"), topRow);
+    m_layoutManagers.insert(QStringLiteral("center_hud"), topRow);
+    m_layoutManagers.insert(QStringLiteral("blue_team_panel"), topRow);
+    m_layoutManagers.insert(QStringLiteral("match_title"), centerLayout);
+    m_layoutManagers.insert(QStringLiteral("match_timer"), centerLayout);
+    m_layoutManagers.insert(QStringLiteral("match_state"), bottomRow);
+    m_layoutManagers.insert(QStringLiteral("source_label"), bottomRow);
 
     m_tickerBar = new QFrame(overlay);
     m_tickerBar->setObjectName(QStringLiteral("tickerBar"));
@@ -656,6 +1195,15 @@ void BroadcastWindow::buildUi()
     m_interactionLayer->hide();
     stack->addWidget(m_interactionLayer, 0, 0);
 
+    m_settlementView = new QLabel(central);
+    m_settlementView->setObjectName(QStringLiteral("settlementView"));
+    m_settlementView->setAlignment(Qt::AlignCenter);
+    m_settlementView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    m_settlementView->setAttribute(Qt::WA_TransparentForMouseEvents);
+    m_settlementView->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    m_settlementView->setGeometry(central->rect());
+    m_settlementView->hide();
+
     setCentralWidget(central);
 }
 
@@ -667,11 +1215,7 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     frame->setObjectName(QStringLiteral("teamHud"));
     frame->setProperty("team", team == kRedTeam ? QStringLiteral("red")
                                                  : QStringLiteral("blue"));
-    frame->setMinimumWidth(420);
-
-    auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(22, 16, 22, 16);
-    layout->setSpacing(7);
+    auto *layout = new HudTeamLayout(frame);
 
     overlay->teamId = team;
     overlay->team = makeLabel(frame, team == kRedTeam ? Qt::AlignRight : Qt::AlignLeft);
@@ -683,9 +1227,10 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     teamFont.setPointSize(30);
     overlay->team->setFont(teamFont);
 
-    auto *teamRow = new QHBoxLayout;
-    teamRow->setContentsMargins(0, 0, 0, 0);
-    teamRow->setSpacing(10);
+    auto *teamRow = new QWidget(frame);
+    auto *teamRowLayout = new QHBoxLayout(teamRow);
+    teamRowLayout->setContentsMargins(0, 0, 0, 0);
+    teamRowLayout->setSpacing(10);
     overlay->connection = makeLabel(
         frame,
         team == kRedTeam ? Qt::AlignRight | Qt::AlignVCenter
@@ -697,19 +1242,20 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     connectionFont.setPointSize(18);
     overlay->connection->setFont(connectionFont);
     if (team == kRedTeam) {
-        teamRow->addStretch(1);
-        teamRow->addWidget(overlay->connection, 0, Qt::AlignRight | Qt::AlignVCenter);
-        teamRow->addWidget(overlay->team, 0, Qt::AlignRight | Qt::AlignVCenter);
+        teamRowLayout->addStretch(1);
+        teamRowLayout->addWidget(overlay->connection, 0, Qt::AlignRight | Qt::AlignVCenter);
+        teamRowLayout->addWidget(overlay->team, 1, Qt::AlignRight | Qt::AlignVCenter);
     } else {
-        teamRow->addWidget(overlay->team, 0, Qt::AlignLeft | Qt::AlignVCenter);
-        teamRow->addWidget(overlay->connection, 0, Qt::AlignLeft | Qt::AlignVCenter);
-        teamRow->addStretch(1);
+        teamRowLayout->addWidget(overlay->team, 1, Qt::AlignLeft | Qt::AlignVCenter);
+        teamRowLayout->addWidget(overlay->connection, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        teamRowLayout->addStretch(1);
     }
-    layout->addLayout(teamRow);
+    layout->addElement(QStringLiteral("team_row"), teamRow);
 
-    auto *cardRow = new QHBoxLayout;
-    cardRow->setContentsMargins(0, 0, 0, 0);
-    cardRow->setSpacing(8);
+    auto *cardRow = new QWidget(frame);
+    auto *cardRowLayout = new QHBoxLayout(cardRow);
+    cardRowLayout->setContentsMargins(0, 0, 0, 0);
+    cardRowLayout->setSpacing(8);
     const auto addCardIndicator = [frame](const QRect &sourceRect,
                                            const QString &labelText,
                                            QLabel **countLabel) {
@@ -739,13 +1285,13 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
             *countLabel = count;
         return indicator;
     };
-    cardRow->addStretch(1);
-    cardRow->addWidget(addCardIndicator(QRect(4, 269, 53, 66), tr("红牌"),
-                                        &overlay->redCard));
-    cardRow->addWidget(addCardIndicator(QRect(897, 472, 53, 66), tr("黄牌"),
-                                        &overlay->yellowCard));
-    cardRow->addStretch(1);
-    layout->addLayout(cardRow);
+    cardRowLayout->addStretch(1);
+    cardRowLayout->addWidget(addCardIndicator(QRect(4, 269, 53, 66), tr("红牌"),
+                                              &overlay->redCard));
+    cardRowLayout->addWidget(addCardIndicator(QRect(897, 472, 53, 66), tr("黄牌"),
+                                              &overlay->yellowCard));
+    cardRowLayout->addStretch(1);
+    layout->addElement(QStringLiteral("card_row"), cardRow);
 
     auto *healthBar = new AtlasProgressBar(
         assetCrop(QStringLiteral(":/broadcast/statusbar_atlas.png"),
@@ -757,7 +1303,7 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     healthBar->setRange(0, kMaxHp);
     healthBar->setFixedHeight(34);
     overlay->healthBar = healthBar;
-    layout->addWidget(healthBar);
+    layout->addElement(QStringLiteral("health_bar"), healthBar);
 
     auto *heatBar = new AtlasProgressBar(
         assetCrop(QStringLiteral(":/broadcast/statusbar_atlas.png"),
@@ -768,7 +1314,7 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     heatBar->setRange(0, kMaxHeat);
     heatBar->setFixedHeight(20);
     overlay->heatBar = heatBar;
-    layout->addWidget(heatBar);
+    layout->addElement(QStringLiteral("heat_bar"), heatBar);
 
     overlay->damageNotice = makeLabel(frame, Qt::AlignCenter);
     overlay->damageNotice->setObjectName(QStringLiteral("damageNotice"));
@@ -812,7 +1358,13 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
         atlasHealthBar->setDamageBufferValue(atlasHealthBar->value());
     });
 
-    auto *statusRow = new QHBoxLayout;
+    auto *statusRow = new QGridLayout;
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    statusRow->setHorizontalSpacing(0);
+    statusRow->setVerticalSpacing(0);
+    for (int column = 0; column < 4; ++column)
+        statusRow->setColumnStretch(column, 1);
+    statusRow->setRowMinimumHeight(0, 28);
     overlay->health = makeLabel(frame);
     overlay->state = makeLabel(frame, Qt::AlignCenter);
     overlay->shoot = makeLabel(frame, Qt::AlignRight | Qt::AlignVCenter);
@@ -825,14 +1377,17 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
     QFont heatFont = overlay->heat->font();
     heatFont.setPointSize(18);
     overlay->heat->setFont(heatFont);
-    statusRow->addWidget(overlay->health);
-    statusRow->addStretch(1);
-    statusRow->addWidget(overlay->heat);
-    statusRow->addStretch(1);
-    statusRow->addWidget(overlay->state);
-    statusRow->addStretch(1);
-    statusRow->addWidget(overlay->shoot);
-    layout->addLayout(statusRow);
+    overlay->health->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    overlay->heat->setAlignment(Qt::AlignCenter);
+    overlay->state->setAlignment(Qt::AlignCenter);
+    overlay->shoot->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    statusRow->addWidget(overlay->health, 0, 0);
+    statusRow->addWidget(overlay->heat, 0, 1);
+    statusRow->addWidget(overlay->state, 0, 2);
+    statusRow->addWidget(overlay->shoot, 0, 3);
+    auto *statusWidget = new QWidget(frame);
+    statusWidget->setLayout(statusRow);
+    layout->addElement(QStringLiteral("status_row"), statusWidget);
 
     updateOverlay(nullptr, *overlay, RobotManager::keyOf(team, 0));
     return frame;
@@ -1018,7 +1573,7 @@ void BroadcastWindow::updateRobots(const QVector<RobotManager::RobotInfo> &robot
 void BroadcastWindow::updateMatchState()
 {
     QString phase;
-    if (m_remainingSeconds == 0)
+    if (m_roundEnded || m_remainingSeconds == 0)
         phase = tr("比赛结束");
     else if (m_matchRunning)
         phase = tr("比赛进行中");
@@ -1040,11 +1595,14 @@ void BroadcastWindow::updateTimerDisplay()
 
 void BroadcastWindow::startMatch()
 {
-    if (m_remainingSeconds == 0)
+    if (m_roundEnded || m_remainingSeconds == 0)
         resetMatch();
     if (m_matchRunning)
         return;
 
+    stopSettlement();
+    m_roundEnded = false;
+    m_settlementType.clear();
     m_matchRunning = true;
     m_matchTimer->start();
     updateTimerDisplay();
@@ -1063,8 +1621,11 @@ void BroadcastWindow::pauseMatch()
 
 void BroadcastWindow::resetMatch()
 {
+    stopSettlement();
     m_matchTimer->stop();
     m_matchRunning = false;
+    m_roundEnded = false;
+    m_settlementType.clear();
     m_remainingSeconds = kMatchDurationSeconds;
     m_redScore = 0;
     m_blueScore = 0;
@@ -1077,8 +1638,11 @@ void BroadcastWindow::resetMatch()
 
 void BroadcastWindow::setMatchState(int remainingSeconds, bool running)
 {
+    stopSettlement();
     m_remainingSeconds = qBound(0, remainingSeconds, kMatchDurationSeconds);
     m_matchRunning = running && m_remainingSeconds > 0;
+    m_roundEnded = false;
+    m_settlementType.clear();
     if (m_matchRunning)
         m_matchTimer->start();
     else
@@ -1086,6 +1650,258 @@ void BroadcastWindow::setMatchState(int remainingSeconds, bool running)
 
     updateTimerDisplay();
     emit matchStateChanged(m_matchRunning);
+}
+
+void BroadcastWindow::terminateMatch()
+{
+    if (m_roundEnded)
+        return;
+    finishMatch(QStringLiteral("termination"));
+}
+
+void BroadcastWindow::finishMatch(const QString &settlementType)
+{
+    m_matchTimer->stop();
+    m_matchRunning = false;
+    m_roundEnded = true;
+    m_settlementType = settlementType;
+    updateTimerDisplay();
+    emit matchStateChanged(false);
+    playSettlement(settlementType);
+    emit roundFinished(settlementType);
+    emit presentationStateChanged();
+}
+
+QString BroadcastWindow::settlementTypeForScores() const
+{
+    if (m_redScore > m_blueScore)
+        return QStringLiteral("redwin");
+    if (m_blueScore > m_redScore)
+        return QStringLiteral("bluewin");
+    return QStringLiteral("draw");
+}
+
+QString BroadcastWindow::settlementAssetDirectory() const
+{
+    const QStringList candidates = {
+        QDir(QCoreApplication::applicationDirPath()).filePath(
+            QStringLiteral("Assets/gamefinishvideo")),
+        QDir(QCoreApplication::applicationDirPath()).filePath(
+            QStringLiteral("../Assets/gamefinishvideo")),
+        QDir::cleanPath(QDir::current().filePath(QStringLiteral("Assets/gamefinishvideo"))),
+        QDir(QFileInfo(QStringLiteral(__FILE__)).absolutePath()).filePath(
+            QStringLiteral("Assets/gamefinishvideo"))
+    };
+
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(QDir(candidate).filePath(QStringLiteral("draw_rgb.mp4"))))
+            return QDir(candidate).absolutePath();
+    }
+    return QString();
+}
+
+QString BroadcastWindow::settlementAssetPath(const QString &type, const QString &suffix) const
+{
+    static const QStringList validTypes = {
+        QStringLiteral("redwin"), QStringLiteral("bluewin"),
+        QStringLiteral("defeated"), QStringLiteral("draw"),
+        QStringLiteral("termination")
+    };
+    if (!validTypes.contains(type) || (suffix != QStringLiteral("rgb")
+                                       && suffix != QStringLiteral("alpha")))
+        return QString();
+
+    const QString directory = settlementAssetDirectory();
+    if (directory.isEmpty())
+        return QString();
+    const QString path = QDir(directory).filePath(
+        QStringLiteral("%1_%2.mp4").arg(type, suffix));
+    return QFileInfo::exists(path) ? path : QString();
+}
+
+QString BroadcastWindow::ffmpegExecutable() const
+{
+    const QDir applicationDir(QCoreApplication::applicationDirPath());
+    const QStringList candidates = {
+        applicationDir.filePath(QStringLiteral("ffmpeg.exe")),
+        applicationDir.filePath(QStringLiteral("tools/ffmpeg/ffmpeg.exe")),
+        applicationDir.filePath(QStringLiteral("tools/ffmpeg.exe")),
+        QDir::cleanPath(applicationDir.filePath(QStringLiteral("../tools/ffmpeg/ffmpeg.exe")))
+    };
+
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(candidate))
+            return QFileInfo(candidate).absoluteFilePath();
+    }
+    return QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+}
+
+void BroadcastWindow::playSettlement(const QString &type)
+{
+    const QString normalizedType = type.trimmed().toLower();
+    if (normalizedType.isEmpty())
+        return;
+    if (m_settlementProcess && m_settlementType == normalizedType)
+        return;
+
+    stopSettlement();
+    m_roundEnded = true;
+    m_settlementType = normalizedType;
+    const QString rgbPath = settlementAssetPath(normalizedType, QStringLiteral("rgb"));
+    const QString alphaPath = settlementAssetPath(normalizedType, QStringLiteral("alpha"));
+    const QString executable = ffmpegExecutable();
+    if (rgbPath.isEmpty() || alphaPath.isEmpty() || executable.isEmpty()) {
+        if (m_settlementView) {
+            m_settlementView->setPixmap(QPixmap());
+            m_settlementView->setText(tr("结算动画资源或 FFmpeg 不可用"));
+            m_settlementView->show();
+            m_settlementView->raise();
+        }
+        return;
+    }
+
+    m_settlementBuffer.clear();
+    m_settlementFrames.clear();
+    m_lastSettlementFrame = QImage();
+    m_settlementFinished = false;
+    if (m_settlementView) {
+        m_settlementView->setPixmap(QPixmap());
+        m_settlementView->setText(QString());
+        m_settlementView->show();
+        m_settlementView->raise();
+    }
+    m_settlementFrameTimer->start();
+
+    m_settlementProcess = new QProcess(this);
+    QProcess *process = m_settlementProcess;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    connect(process, &QProcess::readyReadStandardOutput,
+            this, &BroadcastWindow::consumeSettlementOutput);
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, process](int, QProcess::ExitStatus) {
+                if (m_settlementProcess != process)
+                    return;
+                consumeSettlementOutput();
+                m_settlementFinished = true;
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError) {
+                if (m_settlementProcess != process)
+                    return;
+                consumeSettlementOutput();
+                m_settlementFinished = true;
+                if (m_lastSettlementFrame.isNull() && m_settlementFrames.isEmpty()
+                    && m_settlementView) {
+                    m_settlementView->setText(tr("结算动画播放失败"));
+                    m_settlementView->show();
+                    m_settlementView->raise();
+                }
+            });
+
+    process->start(executable, {
+        QStringLiteral("-hide_banner"),
+        QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-re"),
+        QStringLiteral("-i"), rgbPath,
+        QStringLiteral("-re"),
+        QStringLiteral("-i"), alphaPath,
+        QStringLiteral("-filter_complex"),
+        QStringLiteral("[1:v]format=gray[mask];[0:v][mask]alphamerge,"
+                       "scale=960:540:flags=lanczos,format=bgra[v]"),
+        QStringLiteral("-map"), QStringLiteral("[v]"),
+        QStringLiteral("-an"),
+        QStringLiteral("-f"), QStringLiteral("rawvideo"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
+        QStringLiteral("pipe:1")
+    });
+}
+
+void BroadcastWindow::stopSettlement()
+{
+    QProcess *process = m_settlementProcess;
+    m_settlementProcess = nullptr;
+    m_settlementBuffer.clear();
+    m_settlementFrames.clear();
+    m_lastSettlementFrame = QImage();
+    m_settlementFinished = false;
+    if (m_settlementFrameTimer)
+        m_settlementFrameTimer->stop();
+    if (m_settlementView)
+        m_settlementView->hide();
+    if (!process)
+        return;
+
+    process->disconnect(this);
+    if (process->state() != QProcess::NotRunning) {
+        process->kill();
+        process->waitForFinished(1000);
+    }
+    if (process->state() == QProcess::NotRunning)
+        delete process;
+    else
+        process->deleteLater();
+}
+
+void BroadcastWindow::playSettlementPreview(const QString &type)
+{
+    const bool previousRoundEnded = m_roundEnded;
+    const QString previousSettlementType = m_settlementType;
+    playSettlement(type);
+
+    // A preview must not finish or rename the active match. The animation
+    // itself stays owned by the normal settlement pipeline and can be stopped
+    // by starting/resetting the match as usual.
+    m_roundEnded = previousRoundEnded;
+    m_settlementType = previousSettlementType;
+}
+
+void BroadcastWindow::clearSettlement()
+{
+    stopSettlement();
+    m_roundEnded = false;
+    m_settlementType.clear();
+}
+
+void BroadcastWindow::consumeSettlementOutput()
+{
+    if (!m_settlementProcess)
+        return;
+
+    const int freeFrames = kSettlementFrameQueueLimit - m_settlementFrames.size();
+    if (freeFrames <= 0)
+        return;
+
+    const qint64 bytesNeeded = qint64(freeFrames) * kSettlementFrameBytes
+                               - m_settlementBuffer.size();
+    if (bytesNeeded > 0)
+        m_settlementBuffer.append(m_settlementProcess->read(bytesNeeded));
+
+    while (m_settlementFrames.size() < kSettlementFrameQueueLimit
+           && m_settlementBuffer.size() >= kSettlementFrameBytes) {
+        const QByteArray frameBytes = m_settlementBuffer.left(kSettlementFrameBytes);
+        m_settlementBuffer.remove(0, kSettlementFrameBytes);
+        const QImage frame(reinterpret_cast<const uchar *>(frameBytes.constData()),
+                           kSettlementFrameWidth,
+                           kSettlementFrameHeight,
+                           kSettlementFrameWidth * 4,
+                           QImage::Format_ARGB32);
+        m_settlementFrames.enqueue(frame.copy());
+    }
+}
+
+void BroadcastWindow::renderSettlementFrame(const QImage &frame)
+{
+    if (!m_settlementView || frame.isNull())
+        return;
+
+    m_lastSettlementFrame = frame;
+    const QSize targetSize = m_settlementView->size();
+    if (targetSize.isEmpty())
+        return;
+    const QPixmap pixmap = QPixmap::fromImage(frame).scaled(
+        targetSize, Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
+    m_settlementView->setText(QString());
+    m_settlementView->setPixmap(pixmap);
 }
 
 void BroadcastWindow::setProgramFrame(const QImage &frame)
@@ -1100,7 +1916,32 @@ void BroadcastWindow::setSourceFrame(const QString &sourceId, const QImage &fram
         m_sourceFrames.remove(id);
     else
         m_sourceFrames.insert(id, frame);
-    renderProgramFrame();
+    // Non-program sources remain cached for an instant switch, but must not
+    // trigger a full-window scale and repaint on every incoming frame.
+    if (id == m_activeSource)
+        scheduleProgramRender();
+
+    // Throttled notification for the control-panel preview strip. Emitting on
+    // every frame would make the preview QLabel pay a scale + pixmap upload
+    // at the incoming frame rate, which is wasteful when the strip is only a
+    // few hundred pixels wide.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 last = m_sourceFrameSignalTimes.value(id, 0);
+    if (now - last >= 100) {
+        m_sourceFrameSignalTimes.insert(id, now);
+        emit sourceFrameUpdated(id);
+    }
+}
+
+QImage BroadcastWindow::sourceFrame(const QString &sourceId) const
+{
+    const QString id = sourceId.isEmpty() ? QStringLiteral("field") : sourceId;
+    return m_sourceFrames.value(id);
+}
+
+QStringList BroadcastWindow::knownSourceIds() const
+{
+    return m_sourceFrames.keys();
 }
 
 void BroadcastWindow::setActiveSource(const QString &sourceId, const QString &sourceTitle)
@@ -1112,7 +1953,7 @@ void BroadcastWindow::setActiveSource(const QString &sourceId, const QString &so
                               : sourceTitle;
     if (m_sourceLabel)
         m_sourceLabel->setText(tr("LIVE · %1").arg(m_activeSourceTitle));
-    renderProgramFrame();
+    scheduleProgramRender();
 }
 
 void BroadcastWindow::setTeamNames(const QString &redName, const QString &blueName)
@@ -1278,7 +2119,6 @@ void BroadcastWindow::resetLayoutPositions()
             widget->setMaximumSize(m_layoutMaximumSizes.value(elementId));
         widget->updateGeometry();
     }
-    m_layoutAppliedSizes.clear();
     if (isVisible())
         applyLayoutPositions();
 }
@@ -1287,6 +2127,7 @@ bool BroadcastWindow::saveLayout(const QString &filePath) const
 {
     QSettings settings(filePath, QSettings::IniFormat);
     settings.beginGroup(QStringLiteral("broadcast_layout"));
+    settings.setValue(QStringLiteral("version"), 2);
     for (const QString &elementId : layoutElementIds()) {
         const QPoint position = m_layoutOffsets.value(elementId, QPoint());
         settings.setValue(elementId + QStringLiteral("/x"), position.x());
@@ -1313,15 +2154,17 @@ bool BroadcastWindow::loadLayout(const QString &filePath)
     if (!settings.contains(QStringLiteral("broadcast_layout/center_hud/x")))
         return false;
 
+    const int layoutVersion = settings.value(QStringLiteral("broadcast_layout/version"), 1).toInt();
     m_layoutSizes.clear();
     settings.beginGroup(QStringLiteral("broadcast_layout"));
     for (const QString &elementId : layoutElementIds()) {
         const QString xKey = elementId + QStringLiteral("/x");
         const QString yKey = elementId + QStringLiteral("/y");
         if (settings.contains(xKey) && settings.contains(yKey)) {
-            m_layoutOffsets.insert(elementId,
-                                   QPoint(settings.value(xKey).toInt(),
-                                          settings.value(yKey).toInt()));
+            QPoint position(settings.value(xKey).toInt(), settings.value(yKey).toInt());
+            if (layoutVersion < 2)
+                position -= legacyLayoutOffset(elementId);
+            m_layoutOffsets.insert(elementId, position);
         }
 
         const QString widthKey = elementId + QStringLiteral("/width");
@@ -1371,7 +2214,17 @@ void BroadcastWindow::clearCards()
 void BroadcastWindow::clearProgramFrame()
 {
     m_sourceFrames.remove(QStringLiteral("field"));
-    renderProgramFrame();
+    scheduleProgramRender();
+}
+
+void BroadcastWindow::scheduleProgramRender()
+{
+    if (!m_programRenderTimer)
+        return;
+    if (!isVisible())
+        return;
+    if (!m_programRenderTimer->isActive())
+        m_programRenderTimer->start();
 }
 
 void BroadcastWindow::renderProgramFrame()
@@ -1386,8 +2239,11 @@ void BroadcastWindow::renderProgramFrame()
         return;
     }
 
+    const QSize targetSize = m_programView->size();
+    if (targetSize.isEmpty())
+        return;
     const QPixmap pixmap = QPixmap::fromImage(frame).scaled(
-        m_programView->size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+        targetSize, Qt::KeepAspectRatioByExpanding, Qt::FastTransformation);
     m_programView->setText(QString());
     m_programView->setPixmap(pixmap);
 }
@@ -1406,63 +2262,91 @@ void BroadcastWindow::registerLayoutElement(const QString &elementId, QWidget *w
 
 void BroadcastWindow::applyLayoutPositions()
 {
+    // The main HUD entries are owned by custom layouts.  Feed their saved
+    // values into those layouts instead of moving layout-managed children.
+    // This keeps a text change from changing the coordinate system underneath
+    // a manually edited element.
+    auto *centerHud = dynamic_cast<CenterHudCanvas *>(
+        m_layoutElements.value(QStringLiteral("center_hud")));
+    const auto isCenterElement = [](const QString &elementId) {
+        return elementId == QStringLiteral("left_score_panel")
+               || elementId == QStringLiteral("right_score_panel")
+               || elementId == QStringLiteral("red_round_score")
+               || elementId == QStringLiteral("blue_round_score");
+    };
+    if (centerHud) {
+        for (const QString &elementId : {QStringLiteral("left_score_panel"),
+                                          QStringLiteral("right_score_panel"),
+                                          QStringLiteral("red_round_score"),
+                                          QStringLiteral("blue_round_score")}) {
+            centerHud->setElementOffset(elementId,
+                                         m_layoutOffsets.value(elementId, QPoint()));
+            centerHud->setElementSize(elementId,
+                                       m_layoutSizes.value(elementId, QSize()));
+        }
+    }
+
     for (const QString &elementId : layoutElementIds()) {
         QWidget *widget = m_layoutElements.value(elementId);
         if (!widget)
             continue;
 
-        const QPoint offset = m_layoutOffsets.value(elementId, QPoint());
-        const QPoint currentPosition = widget->pos();
-        QPoint basePosition;
-
-        if (!m_layoutBasePositions.contains(elementId)) {
-            basePosition = currentPosition;
-        } else if (!m_layoutAppliedPositions.contains(elementId)
-                   || currentPosition != m_layoutAppliedPositions.value(elementId)) {
-            // A parent layout or a resize changed the automatic position.
-            basePosition = currentPosition;
-        } else {
-            basePosition = m_layoutBasePositions.value(elementId);
-        }
-
-        m_layoutBasePositions.insert(elementId, basePosition);
-        const QPoint targetPosition = basePosition + offset;
-        if (currentPosition != targetPosition)
-            widget->move(targetPosition);
-        m_layoutAppliedPositions.insert(elementId, targetPosition);
-
-        const QSize currentSize = widget->size();
-        QSize baseSize;
-        if (!m_layoutBaseSizes.contains(elementId)) {
-            baseSize = currentSize;
-        } else if (m_layoutAppliedSizes.contains(elementId)
-                   && currentSize != m_layoutAppliedSizes.value(elementId)) {
-            // A parent layout or a resize changed the automatic size.
-            baseSize = currentSize;
-        } else {
-            baseSize = m_layoutBaseSizes.value(elementId);
-        }
-        m_layoutBaseSizes.insert(elementId, baseSize);
-
-        if (m_layoutSizes.contains(elementId)) {
-            const QSize requestedSize = m_layoutSizes.value(elementId);
-            if (widget->minimumSize() != requestedSize)
-                widget->setMinimumSize(requestedSize);
-            if (widget->maximumSize() != requestedSize)
-                widget->setMaximumSize(requestedSize);
-            if (currentSize != requestedSize)
-                widget->resize(requestedSize);
-            m_layoutAppliedSizes.insert(elementId, requestedSize);
-        } else {
-            if (m_layoutMinimumSizes.contains(elementId))
-                widget->setMinimumSize(m_layoutMinimumSizes.value(elementId));
-            if (m_layoutMaximumSizes.contains(elementId))
-                widget->setMaximumSize(m_layoutMaximumSizes.value(elementId));
-            if (baseSize.isValid() && baseSize.width() > 0 && baseSize.height() > 0
-                && widget->size() != baseSize) {
-                widget->resize(baseSize);
+        if (centerHud && isCenterElement(elementId)) {
+            if (m_layoutSizes.contains(elementId)) {
+                const QSize requestedSize = m_layoutSizes.value(elementId);
+                if (widget->minimumSize() != requestedSize)
+                    widget->setMinimumSize(requestedSize);
+                if (widget->maximumSize() != requestedSize)
+                    widget->setMaximumSize(requestedSize);
+            } else {
+                if (m_layoutMinimumSizes.contains(elementId))
+                    widget->setMinimumSize(m_layoutMinimumSizes.value(elementId));
+                if (m_layoutMaximumSizes.contains(elementId))
+                    widget->setMaximumSize(m_layoutMaximumSizes.value(elementId));
             }
-            m_layoutAppliedSizes.insert(elementId, widget->size());
+            continue;
+        }
+
+        if (QLayout *manager = m_layoutManagers.value(elementId)) {
+            auto *hudLayout = static_cast<HudElementLayout *>(manager);
+            hudLayout->setElementOffset(elementId,
+                                        m_layoutOffsets.value(elementId, QPoint()));
+            hudLayout->setElementSize(elementId,
+                                       m_layoutSizes.value(elementId, QSize()));
+
+            if (m_layoutSizes.contains(elementId)) {
+                const QSize requestedSize = m_layoutSizes.value(elementId);
+                if (widget->minimumSize() != requestedSize)
+                    widget->setMinimumSize(requestedSize);
+                if (widget->maximumSize() != requestedSize)
+                    widget->setMaximumSize(requestedSize);
+            } else {
+                if (m_layoutMinimumSizes.contains(elementId))
+                    widget->setMinimumSize(m_layoutMinimumSizes.value(elementId));
+                if (m_layoutMaximumSizes.contains(elementId))
+                    widget->setMaximumSize(m_layoutMaximumSizes.value(elementId));
+            }
+            continue;
+        }
+
+        // Every registered element is assigned to either a stable layout or
+        // CenterHudCanvas above. Keeping this branch explicit prevents a new
+        // QWidget::move() fallback from reintroducing the original bug.
+    }
+
+    QHash<QLayout *, bool> activatedLayouts;
+    for (QLayout *manager : m_layoutManagers) {
+        if (manager && !activatedLayouts.contains(manager)) {
+            manager->activate();
+            activatedLayouts.insert(manager, true);
+
+            // A configured height changes the size hint of the nested HUD
+            // layout. Re-activate its owning layout so the surrounding
+            // overlay also receives the new row height immediately.
+            if (QWidget *parent = manager->parentWidget()) {
+                if (QLayout *parentLayout = parent->layout(); parentLayout != manager)
+                    parentLayout->activate();
+            }
         }
     }
 }
@@ -1498,9 +2382,10 @@ void BroadcastWindow::closeEvent(QCloseEvent *event)
 void BroadcastWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
+    if (m_settlementView && centralWidget())
+        m_settlementView->setGeometry(centralWidget()->rect());
     applyLayoutPositions();
-    QTimer::singleShot(0, this, &BroadcastWindow::applyLayoutPositions);
-    renderProgramFrame();
+    scheduleProgramRender();
     emit visibilityChanged(true);
 }
 
@@ -1516,7 +2401,11 @@ void BroadcastWindow::hideEvent(QHideEvent *event)
 void BroadcastWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
+    if (m_settlementView && centralWidget())
+        m_settlementView->setGeometry(centralWidget()->rect());
     if (isVisible())
         applyLayoutPositions();
-    renderProgramFrame();
+    scheduleProgramRender();
+    if (!m_lastSettlementFrame.isNull())
+        renderSettlementFrame(m_lastSettlementFrame);
 }

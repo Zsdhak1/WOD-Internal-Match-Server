@@ -9,8 +9,8 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Multimedia)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Multimedia)
 
 set(PROJECT_SOURCES
         main.cpp
@@ -22,6 +22,8 @@ set(PROJECT_SOURCES
         matchserver.cpp
         matchserver.h
         protocol.h
+        robotcommander.cpp
+        robotcommander.h
         robotmanager.cpp
         robotmanager.h
         broadcast_assets.qrc
@@ -66,7 +68,22 @@ add_executable(ScompetitionClient
         broadcast_assets.qrc
 )
 target_link_libraries(ScompetitionClient PRIVATE Qt${QT_VERSION_MAJOR}::Widgets
-Qt${QT_VERSION_MAJOR}::Network)
+Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Multimedia)
+
+# The broadcast window reads its layout beside the executable. Keep a
+# deterministic default next to every target that hosts that window after
+# each rebuild; user edits made while the program is running are therefore
+# never confused with the build-time defaults.
+set(DEFAULT_BROADCAST_LAYOUT_FILE
+    "${CMAKE_CURRENT_SOURCE_DIR}/broadcast_layout.ini")
+foreach(target Scompetition ScompetitionClient)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${DEFAULT_BROADCAST_LAYOUT_FILE}"
+                "$<TARGET_FILE_DIR:${target}>/broadcast_layout.ini"
+        VERBATIM
+    )
+endforeach()
 
 add_executable(RobotSimulator
         simulator_main.cpp
@@ -96,14 +113,29 @@ set_target_properties(Scompetition PROPERTIES
 )
 
 include(GNUInstallDirs)
+set(SETTLEMENT_ASSET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Assets/gamefinishvideo")
 install(TARGETS Scompetition ScompetitionClient RobotSimulator
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+install(FILES "${DEFAULT_BROADCAST_LAYOUT_FILE}"
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(WIN32)
     set(FFMPEG_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
+
+    # GUI applications otherwise fail silently from Explorer when qwindows
+    # and the matching Qt runtime DLLs are missing beside the executable.
+    find_program(WINDEPLOYQT_EXECUTABLE
+        NAMES windeployqt windeployqt.exe
+        HINTS
+            "${CMAKE_PREFIX_PATH}/bin"
+            "$ENV{QTDIR}/bin"
+    )
+    if(NOT WINDEPLOYQT_EXECUTABLE)
+        message(WARNING "windeployqt was not found; Windows packages may be missing Qt runtime files")
+    endif()
 
     # Keep the encoder beside each development executable as well as in the
     # install tree, so local runs exercise the same runtime dependency.
@@ -125,6 +157,27 @@ if(WIN32)
                     "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/README.txt"
             VERBATIM
         )
+
+        if(WINDEPLOYQT_EXECUTABLE)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND "${WINDEPLOYQT_EXECUTABLE}"
+                        --no-translations
+                        "$<TARGET_FILE:${target}>"
+                VERBATIM
+            )
+        endif()
+    endforeach()
+
+    # Keep the paired RGB/mask settlement clips beside development builds.
+    foreach(target Scompetition ScompetitionClient)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:${target}>/Assets/gamefinishvideo"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${SETTLEMENT_ASSET_DIR}"
+                    "$<TARGET_FILE_DIR:${target}>/Assets/gamefinishvideo"
+            VERBATIM
+        )
     endforeach()
 
     install(DIRECTORY "${FFMPEG_RUNTIME_DIR}/"
@@ -136,6 +189,36 @@ if(WIN32)
             PATTERN "README.txt"
     )
 endif()
+
+if(WIN32 AND WINDEPLOYQT_EXECUTABLE)
+    # CPack runs the install script, so deploy Qt into the staged package too.
+    # Keep the install prefix as an install-time variable so --prefix works.
+    set(_windeployqt_install_code [=[
+        set(_qt_deploy_targets
+            "${CMAKE_INSTALL_PREFIX}/@BINDIR@/Scompetition.exe"
+            "${CMAKE_INSTALL_PREFIX}/@BINDIR@/ScompetitionClient.exe"
+            "${CMAKE_INSTALL_PREFIX}/@BINDIR@/RobotSimulator.exe")
+        foreach(_qt_deploy_target IN LISTS _qt_deploy_targets)
+            execute_process(
+                COMMAND "@WINDEPLOYQT@" --no-translations "${_qt_deploy_target}"
+                RESULT_VARIABLE _qt_deploy_result)
+            if(NOT _qt_deploy_result EQUAL 0)
+                message(FATAL_ERROR
+                    "windeployqt failed for ${_qt_deploy_target}: ${_qt_deploy_result}")
+            endif()
+        endforeach()
+    ]=])
+    string(REPLACE "@WINDEPLOYQT@" "${WINDEPLOYQT_EXECUTABLE}"
+           _windeployqt_install_code "${_windeployqt_install_code}")
+    string(REPLACE "@BINDIR@" "${CMAKE_INSTALL_BINDIR}"
+           _windeployqt_install_code "${_windeployqt_install_code}")
+    install(CODE "${_windeployqt_install_code}")
+endif()
+
+install(DIRECTORY "${SETTLEMENT_ASSET_DIR}/"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}/Assets/gamefinishvideo"
+    FILES_MATCHING PATTERN "*.mp4"
+)
 
 set(CPACK_PACKAGE_NAME "WOD-Internal-Match-Server")
 set(CPACK_PACKAGE_VENDOR "WOD Internal Match")

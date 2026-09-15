@@ -3,10 +3,12 @@
 
 #include "robotmanager.h"
 
+#include <QByteArray>
 #include <QImage>
 #include <QHash>
 #include <QMainWindow>
 #include <QPoint>
+#include <QQueue>
 #include <QSize>
 #include <QStringList>
 #include <QVector>
@@ -15,8 +17,10 @@ class QCloseEvent;
 class QHideEvent;
 class QLabel;
 class QGraphicsOpacityEffect;
+class QLayout;
 class QPropertyAnimation;
 class QProgressBar;
+class QProcess;
 class QResizeEvent;
 class QScreen;
 class QShowEvent;
@@ -44,6 +48,9 @@ public:
     void setProgramFrame(const QImage &frame);
     void setSourceFrame(const QString &sourceId, const QImage &frame);
     void setActiveSource(const QString &sourceId, const QString &sourceTitle = QString());
+    // Read-only access for the control panel's per-source preview strip.
+    QImage sourceFrame(const QString &sourceId) const;
+    QStringList knownSourceIds() const;
     void setTeamNames(const QString &redName, const QString &blueName);
     void setScores(int redScore, int blueScore);
     void setTickerText(const QString &text);
@@ -66,10 +73,18 @@ public:
     void pauseMatch();
     void resetMatch();
     void setMatchState(int remainingSeconds, bool running);
+    void terminateMatch();
+    void playSettlement(const QString &type);
+    void playSettlementPreview(const QString &type);
+    void stopSettlement();
+    void clearSettlement();
     bool isMatchRunning() const { return m_matchRunning; }
     int remainingSeconds() const { return m_remainingSeconds; }
     int redScore() const { return m_redScore; }
     int blueScore() const { return m_blueScore; }
+    bool roundEnded() const { return m_roundEnded; }
+    QString settlementType() const { return m_settlementType; }
+    bool settlementPlaying() const { return m_settlementProcess != nullptr; }
     QString redTeamName() const { return m_teamNames.value(1, QStringLiteral("红方")); }
     QString blueTeamName() const { return m_teamNames.value(2, QStringLiteral("蓝方")); }
 
@@ -77,6 +92,10 @@ signals:
     void visibilityChanged(bool visible);
     void matchStateChanged(bool running);
     void presentationStateChanged();
+    void roundFinished(const QString &settlementType);
+    // Emitted at most ~10 Hz per source so the control-panel preview strip
+    // does not have to scale every incoming frame.
+    void sourceFrameUpdated(const QString &sourceId);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -115,10 +134,18 @@ private:
                              int damage,
                              int previousHp,
                              int currentHp);
+    void finishMatch(const QString &settlementType);
+    QString settlementTypeForScores() const;
     void updateTimerDisplay();
     void updateMatchState();
     void animateTicker();
+    void scheduleProgramRender();
     void renderProgramFrame();
+    QString settlementAssetDirectory() const;
+    QString settlementAssetPath(const QString &type, const QString &suffix) const;
+    QString ffmpegExecutable() const;
+    void consumeSettlementOutput();
+    void renderSettlementFrame(const QImage &frame);
     void registerLayoutElement(const QString &elementId, QWidget *widget);
     void applyLayoutPositions();
     const RobotManager::RobotInfo *robotForTeam(
@@ -127,15 +154,13 @@ private:
 
     QHash<quint64, RobotOverlay> m_overlays;
     QHash<QString, QWidget *> m_layoutElements;
+    QHash<QString, QLayout *> m_layoutManagers;
     QHash<QString, QPoint> m_layoutOffsets;
-    QHash<QString, QPoint> m_layoutBasePositions;
-    QHash<QString, QPoint> m_layoutAppliedPositions;
     QHash<QString, QSize> m_layoutSizes;
-    QHash<QString, QSize> m_layoutBaseSizes;
-    QHash<QString, QSize> m_layoutAppliedSizes;
     QHash<QString, QSize> m_layoutMinimumSizes;
     QHash<QString, QSize> m_layoutMaximumSizes;
     QLabel *m_programView = nullptr;
+    QLabel *m_settlementView = nullptr;
     QLabel *m_matchTitle = nullptr;
     QLabel *m_timerLabel = nullptr;
     QLabel *m_scoreLabel = nullptr;
@@ -150,7 +175,14 @@ private:
     QPropertyAnimation *m_tickerOpacityAnimation = nullptr;
     QWidget *m_interactionLayer = nullptr;
     QTimer *m_matchTimer = nullptr;
+    QTimer *m_programRenderTimer = nullptr;
+    QTimer *m_settlementFrameTimer = nullptr;
+    QProcess *m_settlementProcess = nullptr;
     QHash<QString, QImage> m_sourceFrames;
+    QHash<QString, qint64> m_sourceFrameSignalTimes;
+    QByteArray m_settlementBuffer;
+    QQueue<QImage> m_settlementFrames;
+    QImage m_lastSettlementFrame;
     QHash<quint8, QString> m_teamNames;
     QHash<quint64, int> m_lastHp;
     QHash<quint8, int> m_redCards;
@@ -164,6 +196,9 @@ private:
     QString m_tickerText;
     bool m_tickerVisible = false;
     bool m_matchRunning = false;
+    bool m_roundEnded = false;
+    bool m_settlementFinished = false;
+    QString m_settlementType;
 };
 
 #endif // BROADCASTWINDOW_H

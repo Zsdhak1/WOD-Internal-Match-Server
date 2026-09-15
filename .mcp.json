@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "G:\\Projects\\CodexProjects\\Scompetition\\.tools\\whenyoung-pkg\\node_modules\\@whenyoung\\codegraph\\dist\\bin\\codegraph.js",
+        "serve",
+        "--mcp",
+        "--path",
+        "G:\\Projects\\CodexProjects\\Scompetition\\Scompetition"
+      ],
+      "env": {}
+    }
+  }
+}
