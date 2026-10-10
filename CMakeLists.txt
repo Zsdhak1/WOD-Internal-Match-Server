@@ -296,36 +296,30 @@ if(WIN32)
         message(WARNING "windeployqt was not found; Windows packages may be missing Qt runtime files")
     endif()
 
-    # Keep the encoder beside each development executable as well as in the
-    # install tree, so local runs exercise the same runtime dependency.
-    foreach(target Scompetition ScompetitionClient RobotSimulator)
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory
-                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${FFMPEG_RUNTIME_DIR}/ffmpeg.exe"
-                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/ffmpeg.exe"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${FFMPEG_RUNTIME_DIR}/ffprobe.exe"
-                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/ffprobe.exe"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${FFMPEG_RUNTIME_DIR}/LICENSE.txt"
-                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/LICENSE.txt"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${FFMPEG_RUNTIME_DIR}/README.txt"
-                    "$<TARGET_FILE_DIR:${target}>/tools/ffmpeg/README.txt"
-            VERBATIM
-        )
-
-        if(WINDEPLOYQT_EXECUTABLE)
-            add_custom_command(TARGET ${target} POST_BUILD
+    # All development executables share one output directory. Deploy once,
+    # after all links finish: concurrent POST_BUILD windeployqt/copies race on
+    # Qt6Core.dll and other shared files on a clean GitHub runner.
+    add_custom_target(development_runtime ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:Scompetition>/tools/ffmpeg"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFMPEG_RUNTIME_DIR}/ffmpeg.exe"
+                "${FFMPEG_RUNTIME_DIR}/ffprobe.exe"
+                "${FFMPEG_RUNTIME_DIR}/LICENSE.txt"
+                "${FFMPEG_RUNTIME_DIR}/README.txt"
+                "$<TARGET_FILE_DIR:Scompetition>/tools/ffmpeg"
+        DEPENDS Scompetition ScompetitionClient RobotSimulator
+        VERBATIM
+    )
+    if(WINDEPLOYQT_EXECUTABLE)
+        foreach(target Scompetition ScompetitionClient RobotSimulator)
+            add_custom_command(TARGET development_runtime POST_BUILD
                 COMMAND "${WINDEPLOYQT_EXECUTABLE}"
-                        --no-translations
-                        "$<TARGET_FILE:${target}>"
+                        --no-translations "$<TARGET_FILE:${target}>"
                 VERBATIM
             )
-        endif()
-    endforeach()
+        endforeach()
+    endif()
 
     # Keep the paired RGB/mask settlement clips beside development builds.
     # Both executables share one output directory; copying from two parallel
