@@ -1,0 +1,12 @@
+# Private runtime data and generated Python caches
+/data/
+__pycache__/
+*.py[cod]
+/tmp*/
+*.sqlite3
+*.sqlite3-*
+
+# Generated packages, browser profiles, screenshots, logs and reports
+/packages/
+/verification/*
+!/verification/README.md

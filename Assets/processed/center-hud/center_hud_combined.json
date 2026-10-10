@@ -1,0 +1,56 @@
+{
+  "sourceAtlas": "Assets/未处理UI/sactx-0-512x256-DXT5_BC3-NotepadAtlas-a8efa592.png",
+  "size": [
+    400,
+    118
+  ],
+  "composition": "N15 below N16B and N16A, static artwork only",
+  "parts": [
+    {
+      "id": "N15",
+      "sourceRect": [
+        7,
+        156,
+        400,
+        94
+      ],
+      "destinationRect": [
+        0,
+        14,
+        400,
+        94
+      ]
+    },
+    {
+      "id": "N16B",
+      "sourceRect": [
+        421,
+        194,
+        82,
+        62
+      ],
+      "destinationRect": [
+        18,
+        22,
+        98,
+        74
+      ]
+    },
+    {
+      "id": "N16A",
+      "sourceRect": [
+        421,
+        133,
+        82,
+        61
+      ],
+      "destinationRect": [
+        284,
+        22,
+        98,
+        74
+      ]
+    }
+  ],
+  "textBakedIn": false
+}

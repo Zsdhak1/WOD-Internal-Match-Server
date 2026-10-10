@@ -41,6 +41,9 @@ namespace proto {
     TypeShootDisabled = 0x07,
     TypeLinkDown      = 0x08,   // V2 new
     TypeLinkUp        = 0x09,
+    TypeDeviceAnnounce= 0x0A,   // 25B, ESP32/controller MAC registry
+    TypeCombatEnd     = 0x0B,   // 5B
+    TypeDeviceHealth  = 0x0C,   // 6B, component bitmap
     TypeGameStart     = 0x81,
     TypeGameEnd       = 0x82,
     TypeAssignment    = 0x83,
@@ -66,6 +69,9 @@ namespace proto {
     quint32 transactionId;   // V2 reliable + ACK
     quint8  ackedFrameType;  // V2 ACK only
     quint8  result;          // V2 ACK only: 0=ok 1=rejected 2=failed
+    quint8  componentOnline; // V2 health bitmap
+    QByteArray deviceMac;    // V2 announce/assignment
+    QByteArray controllerMac;// V2 announce/assignment
     bool    fromStatus;
   };
 
@@ -80,7 +86,10 @@ namespace proto {
   // V2 下行构造（服务端用）
   QByteArray makeGameStart(quint8 target, quint32 txid);                   // 9B
   QByteArray makeGameEnd(quint8 target, quint32 txid);
-  QByteArray makeAssignment(quint8 robotId, const QByteArray &mac6, quint32 txid); // 15B
+  QByteArray makeDeviceAnnounce(...);                                      // 25B
+  QByteArray makeDeviceHealth(quint8 robotId, quint8 componentOnline);       // 6B
+  QByteArray makeAssignment(quint8 robotId, const QByteArray &deviceMac6,
+                            const QByteArray &controllerMac6, quint32 txid);  // 21B
   QByteArray makeStatusRequest(quint8 target);                              // 5B
   QByteArray makeSetHp(quint8 target, quint16 hp, quint32 txid);            // 11B
   QByteArray makeYellowCard(quint8 target, quint32 txid);
@@ -92,12 +101,13 @@ namespace proto {
 
 **校验规则**：
 - `version=1`：按 V1 长度表解析（状态 10/12、事件 6/8）
-- `version=2`：严格按 V2 长度表（status=14、reliable=9、event=5、ack=10）
+- `version=2`：严格按 V2 长度表（status=14、health=6、announce=25、reliable=9、event=5、assignment=21、ack=10）
 - 死亡/复活回 ACK 到 `sender:senderPort`
 
 ### P1：`RobotManager` V2 支持
 **改动点**：
-- `RobotInfo` 加字段：`power`、`powerOn`、`protocolVersion`、`lastIp`、`lastPort`、`lastTxid`
+- `RobotInfo` 加字段：`power`、`powerOn`、`protocolVersion`、`componentOnline`、`lastTxid`；网络地址保存为 IP 文本 + 32 位 IPv4，避免跨事件长期持有 `QHostAddress`
+- 维护 `ESP32 Wi-Fi MAC -> DeviceInfo` 设备表：当前 IP、手柄 BLE MAC、robot_id、丢包/发送失败计数
 - `m_robotTeamMap: QHash<quint8, quint8>` —— `robot_id → team` 服务器映射，QSettings 持久化
 - `m_processedTxids: QHash<quint8, QSet<quint64>>` —— `(robotId, type<<32|txid)` 去重，QSettings 持久化
 - 收到 V2 死亡/复活 → 回 ACK + 去重
@@ -113,7 +123,7 @@ class RobotCommander : public QObject {
 public:
   explicit RobotCommander(QUdpSocket *uplink, QObject *parent);
 
-  void learnRobotIp(quint8 robotId, const QHostAddress &ip, quint16 port);
+  void learnEndpoint(quint8 robotId, quint32 ipv4, quint16 port);
 
   // 所有返回 transaction_id；自动重传相同 txid 最多 2 次（100ms 间隔）
   quint32 sendGameStart(quint8 target);
@@ -122,7 +132,9 @@ public:
   quint32 sendForcePowerOff(quint8 target);
   quint32 sendForcePowerOn(quint8 target);
   quint32 sendSetHp(quint8 target, quint16 hp);
-  quint32 sendAssignment(quint8 robotId, const QByteArray &mac6);
+  quint32 sendAssignment(quint32 ipv4, quint8 robotId,
+                         const QByteArray &deviceMac6,
+                         const QByteArray &controllerMac6);
   void    sendStatusRequest(quint8 target);
 
   // 由 RobotManager 在收到 ACK 帧时调用
@@ -160,9 +172,9 @@ private:
 
 ### P4：`MainWindow` UI
 新增"设备管理"分组：
-- 列出已收到状态的 `robotId`、`lastIp`、`protocolVersion`、当前 `team` 分配
+- 列出已收到 `DEVICE_ANNOUNCE` 的设备：ESP32 Wi-Fi MAC、当前 IP、手柄 BLE MAC、当前 `robotId`
 - 每行可选队伍（红/蓝）→ 更新 `m_robotTeamMap`
-- "分配手柄 MAC" 输入框 + 按钮 → 发 `ASSIGNMENT`
+- 选择未分配设备，输入机器人 ID + 手柄 MAC，点击分配 → 发 21 字节 `ASSIGNMENT` 到设备 IP:UDP 5006
 - "通电"/"断电"/"黄牌" 每行操作按钮
 
 新增"比赛控制"分组：
@@ -213,8 +225,8 @@ ESP32 下行: UDP 5006
 ## 风险点
 
 1. **`robot_id → team` 无协议下发**：必须服务器侧持久化映射，重启不丢
-2. **ESP32 IP 只能通过上行得知**：未发状态帧的设备无法收到下行命令
-3. **ASSIGNMENT 无设备发现**：全新 ESP32 第一次上线必须手工提供 IP（读串口日志或预配置）
+2. **设备表来自内存中的 `DEVICE_ANNOUNCE`**：服务器重启后必须等待 ESP32 再次上报，才能下发命令
+3. **ID 分配必须带 ESP32 Wi-Fi MAC**：不能在多台未分配设备中猜测目标，也不能复用旧的 15 字节帧
 4. **事务号去重需持久化**：QSettings 存 `(robotId, type, txid) → result`，重启后 ESP32 重发不重复执行
 5. **黄牌语义变化**：V1 是服务器显示，V2 是命令 ESP32 扣血。UI 上"红牌" 不再单独存在，由 L431 累计 3 次黄牌后判负
 6. **状态帧功率字段**：`power` 是整数瓦特，UI 需要量程选择（如 0-500W）
@@ -222,7 +234,36 @@ ESP32 下行: UDP 5006
 
 ## 测试策略
 
-1. **协议单元测试**：`tools/protocol_test.cpp` 覆盖所有帧类型的 parse/build 往返
+1. **协议单元测试**：`RobotProtocolSmokeTest` 覆盖 V2 设备注册、状态、健康、战斗结束和 21 字节 ASSIGNMENT 往返
 2. **模拟器对测**：`RobotSimulator --v2` ↔ `Scompetition` 完整流程
 3. **ESP32 真机**：单台 ESP32 烧录最新固件，跑通登记→状态→开始→黄牌→结束→复活链路
 4. **多车**：2 台 ESP32 + 2 台 RobotSimulator 混合测试
+
+## 2026-09-25 模拟器修复验收
+
+已修复模拟器缺少 DEVICE_ANNOUNCE、仍按旧 15 字节读取 ASSIGNMENT、未更新分配身份、未接收上行源端口 ACK 的问题。现在按本机 IPv4 保存独立模拟设备 MAC/ID/手柄绑定，两个环回地址可同时模拟红蓝车。服务端等待成功 ACK 后才更新队伍；周期设备刷新保留正在编辑的分配表单。
+
+补齐命令去重、非法 MAC/目标 ID 拒绝、端口占用回滚、重启事务号持久化、ID 冲突检测、重新分配后的旧状态/端点清理。停止监听会取消尚未确认的命令，避免关闭后的 socket 因重试重新绑定随机端口。
+
+HUD 的 V2 血量上限为 300，V1 为 5000；TCP 快照携带协议版本、功率、供电和链路字段。离线状态不再把未知供电当作实时状态。COMBAT_END 只表示停止交火，不改射击许可。模拟器准备模式 HP=200、正式模式 HP=300，普通受击扣 20，黄牌扣 50/50/判负。手动状态编辑仍用于注入测试快照；自动复活、BLE 和硬件保护不属于该模拟器的完整仿真范围。
+
+### 上游核对
+
+GitHub commits/HEAD 在 2026-09-25 返回 0b190aa9c47c14290f3bb46934aca4ce41cf632e（2026-09-22）。已取得该提交相对本地 39853c85308afb7acd6df5a7df51d203b7ef78c1 的完整 compare，只有 1 次提交，修改 README、手柄接收机说明、l431_link.c 和 main.c；没有修改 robot_protocol.h 或 ASSIGNMENT 处理函数。改动主要为 L431 链路超时、B7 接收及手柄控制策略，UDP V2 固定帧格式不变。原始响应保存在 build/upstream-latest.json 和 build/upstream-compare.json。
+
+### 验证结果与边界
+
+- MSVC2022 / Qt 6.8.3 Debug 全量构建通过。
+- SimulatorIntegrationTest：真实双设备 UDP、服务端、TCP 选手端及重新分配/重启流程通过。
+- QT_SCALE_FACTOR=1、1.25、1.5、2 均通过；每档验证 4 种 HUD 窗口尺寸、5 档 HP 和 5 档热量的像素边界、状态文字及裁切，另验证服务端、选手端和模拟器的指定窗口尺寸。每档生成 50 张 PNG，路径 build/msvc2022_64-Debug/simulator-verification/scale-倍率/。
+- 测试配置使用临时 INI，且验证实际文件路径。早期未隔离测试写入的已确认 ID 71/72 分配和对应死亡事务已清理；注册表备份位于 build/pre-test-settings-cleanup.reg，原有 ID 2 数据保留。
+- 此次新增验证全部离屏运行，不控制用户显示器或鼠标键盘；真实显示器跨屏、GPU 视频和实机协议验收仍需在对应环境进行，不能由离屏通过推断。
+
+## 2026-10-01 自动判定、赛后数据与动效
+
+- 新增 MatchReferee（matchreferee.h/.cpp）：纯逻辑判定，时间由调用方注入；规则与优先级见 README“自动胜负判定”。MatchRefereeTest 18 个用例覆盖同时击毁、复活取消、开局 0 HP、黄牌扣血不计伤害、DQ 优先于击毁、离线宽限（暂停不计/重连清零/双方离线不判）、V1/V2 血量比例、各级平局规则。
+- 导播台倒计时归零不再按手填比分结算，改为 timeExpired → MatchReferee；选手端同样不在本地结算，只跟随服务端 match_state（新增 notice / summary / summaryExpanded 字段）。
+- 修复：暂停后继续会重发 GAME_START 导致机器人回满血；开始下一局会清零小局积分（现在仅“重置比赛”清零）。
+- HUD：可展开赛后数据面板（折叠条 → 统计、血量曲线、关键事件；鼠标/Enter/Space/Esc 可切换）；阵亡/离线面板变暗、受击边缘闪光、胜者边框与“本局胜者”标记；最后 10 秒计时脉冲、暂停时计时变灰；比分变化闪金；跑马灯改为按时间匀速滚动；修复标题与热量文字颜色、视角标签初始为空。
+- 控制台：新增“胜负判定”区（实时状态、规则、裁判判定、展开赛后数据）；4:3 窗口不再上下堆叠导致控制区只有约 90 px 高。
+- 验证：MSVC2022 / Qt 6.8.3 Debug 全量构建，ctest 4/4 通过（离屏）。未验证：真实显示器与 GPU 视频下的动画流畅度、ESP32 实机上 DEATH/STATUS 的实际时序。

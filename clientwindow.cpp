@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QFont>
 #include <QFormLayout>
@@ -118,6 +119,60 @@ void styleLabel(QLabel *label, const QColor &color, bool bold = false)
                              .arg(color.name(), bold ? QStringLiteral(" font-weight: 700;")
                                                        : QString()));
 }
+
+// Registration overlay chrome, authored against the 1920x1080 reference and
+// scaled by the HUD scale factor.
+QString registrationStyleSheet(qreal scale)
+{
+    const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    return QStringLiteral(
+        "QWidget#registrationOverlay { background: rgba(3, 7, 11, 242); color: #f4f7fa; }"
+        "QFrame#registrationCard { background: rgba(10, 18, 27, 250); border: %1px solid #3d4d5a; border-radius: %2px; }"
+        "QLabel#registrationTitle { color: #f4f7fa; }"
+        "QLabel#registrationSubtitle { color: #9eabb5; }"
+        "QLabel#registrationPreview { background: #05080c; border: 1px solid #455661; color: #8d9aa4; }"
+        "QLineEdit, QComboBox { min-height: %3px; background: #111c26; border: 1px solid #536574; border-radius: %4px; padding: 0 %5px; color: #f4f7fa; }"
+        "QLineEdit:focus, QComboBox:focus { border-color: #72b4ff; }"
+        "QPushButton { min-height: %3px; background: #233746; border: 1px solid #5b7180; border-radius: %4px; padding: 0 %6px; color: #f4f7fa; }"
+        "QPushButton:hover { background: #2d4a5d; }"
+        "QPushButton:pressed { background: #1a2d3b; }"
+        "QPushButton#registerButton { background: #2f6d8e; border-color: #72b4ff; font-weight: 700; min-height: %7px; }"
+        "QLabel#registrationStatus { color: #d5e0e6; }")
+        .arg(px(2))
+        .arg(px(8))
+        .arg(px(34))
+        .arg(px(4))
+        .arg(px(9))
+        .arg(px(14))
+        .arg(px(42));
+}
+
+QString controlLayerStyleSheet(qreal scale)
+{
+    const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    return QStringLiteral(
+        "QToolButton#controlsButton { min-height: %1px; background: rgba(10, 18, 27, 230); border: %2px solid #5e7381; border-radius: %3px; padding: 0 %4px; color: #f4f7fa; font-weight: 700; }"
+        "QToolButton#controlsButton:hover { background: rgba(37, 66, 83, 245); }"
+        "QFrame#clientControls { background: rgba(8, 15, 22, 245); border: %2px solid #536774; border-radius: %5px; color: #f4f7fa; }"
+        "QLabel#clientIdentity { color: #f4f7fa; font-size: %6px; font-weight: 700; }"
+        "QLabel#clientConnection { color: #72d39a; }"
+        "QLabel#clientPreview { background: #05080c; border: 1px solid #455661; color: #8d9aa4; }"
+        "QComboBox { min-height: %7px; background: #111c26; border: 1px solid #536574; border-radius: %8px; padding: 0 %9px; color: #f4f7fa; }"
+        "QPushButton { min-height: %7px; background: #233746; border: 1px solid #5b7180; border-radius: %8px; padding: 0 %10px; color: #f4f7fa; }"
+        "QPushButton:hover { background: #2d4a5d; }"
+        "QPushButton#logoutButton { background: #512e36; border-color: #b96875; }"
+        "QPlainTextEdit { background: rgba(3, 7, 11, 210); border: 1px solid #394b57; color: #c9d4da; }")
+        .arg(px(36))
+        .arg(px(2))
+        .arg(px(5))
+        .arg(px(13))
+        .arg(px(7))
+        .arg(px(17))
+        .arg(px(32))
+        .arg(px(4))
+        .arg(px(8))
+        .arg(px(11));
+}
 } // namespace
 
 ClientWindow::ClientWindow(QWidget *parent)
@@ -145,15 +200,48 @@ ClientWindow::ClientWindow(QWidget *parent)
             startVideoPreview();
     });
 
+    // The server's MatchReferee owns the result. The local clock only
+    // mirrors it and must not settle the round on its own at 00:00.
+    setAutoFinishOnTimeout(false);
+
     buildUi();
+    connect(this, &BroadcastWindow::matchStateChanged, this, [this](bool running) {
+        if (!running) {
+            m_combatRoundRunning = false;
+            resetCombatFeedback();
+        }
+    });
+    connect(this, &BroadcastWindow::roundFinished, this, [this](const QString &) {
+        m_combatRoundRunning = false;
+        resetCombatFeedback();
+    });
     refreshVideoDevices();
     showLoginPage();
+}
+
+ClientWindow::~ClientWindow()
+{
+    // Disconnect while all derived members still exist: QTcpSocket destruction
+    // can otherwise emit disconnected during QWidget's child teardown, after
+    // the HP trackers and controls have already been destroyed.
+    if (m_socket) {
+        m_socket->disconnect(this);
+        m_socket->abort();
+    }
+    resetCombatFeedback(true);
+    stopVideoPreview();
+    stopSettlement();
 }
 
 void ClientWindow::buildUi()
 {
     buildRegistrationOverlay();
     buildControlLayer();
+    if (m_controlLayer) {
+        m_combatOverlay = new PlayerCombatOverlay(m_controlLayer);
+        layoutCombatOverlay();
+        m_combatOverlay->lower(); // Settings remain interactive and above effects.
+    }
 
     if (centralWidget()) {
         const QRect rect = centralWidget()->rect();
@@ -177,19 +265,7 @@ void ClientWindow::buildRegistrationOverlay()
 
     m_registrationOverlay = new QWidget(host);
     m_registrationOverlay->setObjectName(QStringLiteral("registrationOverlay"));
-    m_registrationOverlay->setStyleSheet(QStringLiteral(
-        "QWidget#registrationOverlay { background: rgba(3, 7, 11, 242); color: #f4f7fa; }"
-        "QFrame#registrationCard { background: rgba(10, 18, 27, 250); border: 2px solid #3d4d5a; border-radius: 8px; }"
-        "QLabel#registrationTitle { color: #f4f7fa; }"
-        "QLabel#registrationSubtitle { color: #9eabb5; }"
-        "QLabel#registrationPreview { background: #05080c; border: 1px solid #455661; color: #8d9aa4; }"
-        "QLineEdit, QComboBox { min-height: 34px; background: #111c26; border: 1px solid #536574; border-radius: 4px; padding: 0 9px; color: #f4f7fa; }"
-        "QLineEdit:focus, QComboBox:focus { border-color: #72b4ff; }"
-        "QPushButton { min-height: 34px; background: #233746; border: 1px solid #5b7180; border-radius: 4px; padding: 0 14px; color: #f4f7fa; }"
-        "QPushButton:hover { background: #2d4a5d; }"
-        "QPushButton:pressed { background: #1a2d3b; }"
-        "QPushButton#registerButton { background: #2f6d8e; border-color: #72b4ff; font-weight: 700; min-height: 42px; }"
-        "QLabel#registrationStatus { color: #d5e0e6; }"));
+    m_registrationOverlay->setStyleSheet(registrationStyleSheet(1.0));
 
     auto *root = new QVBoxLayout(m_registrationOverlay);
     root->setContentsMargins(24, 24, 24, 24);
@@ -234,8 +310,10 @@ void ClientWindow::buildRegistrationOverlay()
     networkForm->setVerticalSpacing(10);
     m_serverEdit = new QLineEdit(QStringLiteral("127.0.0.1"), card);
     m_portEdit = new QLineEdit(QString::number(matchproto::kControlPort), card);
+    m_portEdit->setObjectName(QStringLiteral("clientServerPort"));
     m_portEdit->setValidator(new QIntValidator(1, 65535, m_portEdit));
     m_teamEdit = new QComboBox(card);
+    m_teamEdit->setObjectName(QStringLiteral("clientTeam"));
     m_teamEdit->addItem(tr("红方"), kRedTeam);
     m_teamEdit->addItem(tr("蓝方"), kBlueTeam);
     connect(m_teamEdit, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -259,6 +337,7 @@ void ClientWindow::buildRegistrationOverlay()
     auto *sourceLayout = new QVBoxLayout;
     sourceLayout->setSpacing(7);
     m_registrationSourceEdit = new QComboBox(card);
+    m_registrationSourceEdit->setObjectName(QStringLiteral("clientVideoSource"));
     m_registrationSourceEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     connect(m_registrationSourceEdit, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &ClientWindow::onRegistrationSourceChanged);
@@ -309,18 +388,7 @@ void ClientWindow::buildControlLayer()
     if (!m_controlLayer)
         return;
 
-    m_controlLayer->setStyleSheet(QStringLiteral(
-        "QToolButton#controlsButton { min-height: 36px; background: rgba(10, 18, 27, 230); border: 2px solid #5e7381; border-radius: 5px; padding: 0 13px; color: #f4f7fa; font-weight: 700; }"
-        "QToolButton#controlsButton:hover { background: rgba(37, 66, 83, 245); }"
-        "QFrame#clientControls { background: rgba(8, 15, 22, 245); border: 2px solid #536774; border-radius: 7px; color: #f4f7fa; }"
-        "QLabel#clientIdentity { color: #f4f7fa; font-size: 17px; font-weight: 700; }"
-        "QLabel#clientConnection { color: #72d39a; }"
-        "QLabel#clientPreview { background: #05080c; border: 1px solid #455661; color: #8d9aa4; }"
-        "QComboBox { min-height: 32px; background: #111c26; border: 1px solid #536574; border-radius: 4px; padding: 0 8px; color: #f4f7fa; }"
-        "QPushButton { min-height: 32px; background: #233746; border: 1px solid #5b7180; border-radius: 4px; padding: 0 11px; color: #f4f7fa; }"
-        "QPushButton:hover { background: #2d4a5d; }"
-        "QPushButton#logoutButton { background: #512e36; border-color: #b96875; }"
-        "QPlainTextEdit { background: rgba(3, 7, 11, 210); border: 1px solid #394b57; color: #c9d4da; }"));
+    m_controlLayer->setStyleSheet(controlLayerStyleSheet(1.0));
 
     auto *root = new QVBoxLayout(m_controlLayer);
     root->setContentsMargins(26, 24, 26, 24);
@@ -428,6 +496,9 @@ void ClientWindow::buildControlLayer()
 
 void ClientWindow::showLoginPage()
 {
+    resetCombatFeedback(true);
+    if (m_combatOverlay)
+        m_combatOverlay->hide();
     m_loginInProgress = false;
     if (m_loginTimeoutTimer)
         m_loginTimeoutTimer->stop();
@@ -487,6 +558,7 @@ void ClientWindow::showLoginPage()
 
 void ClientWindow::showSessionPage(const QString &displayName, int team, int robotId)
 {
+    resetCombatFeedback(true);
     m_registered = true;
     m_displayName = displayName;
     m_selectedTeam = team;
@@ -513,6 +585,11 @@ void ClientWindow::showSessionPage(const QString &displayName, int team, int rob
     if (m_controlPanel)
         m_controlPanel->hide();
 
+    layoutCombatOverlay();
+    if (m_combatOverlay) {
+        m_combatOverlay->setVisible(m_selectedTeam == kRedTeam || m_selectedTeam == kBlueTeam);
+        m_combatOverlay->lower();
+    }
     updateActiveRobotSource();
     appendLog(tr("登记成功，已进入选手端全屏比赛画面"));
 }
@@ -532,6 +609,7 @@ void ClientWindow::onLoginClicked()
         return;
     }
 
+    resetCombatFeedback(true);
     m_selectedTeam = team;
     m_selectedRobotId = kDefaultRobotId;
     m_displayName = m_displayNameEdit ? m_displayNameEdit->text().trimmed() : QString();
@@ -598,6 +676,9 @@ void ClientWindow::onSocketReadyRead()
 
 void ClientWindow::onSocketDisconnected()
 {
+    resetCombatFeedback(true);
+    if (m_combatOverlay)
+        m_combatOverlay->hide();
     if (m_loginTimeoutTimer)
         m_loginTimeoutTimer->stop();
 
@@ -626,6 +707,9 @@ void ClientWindow::onSocketDisconnected()
 
 void ClientWindow::onSocketError()
 {
+    resetCombatFeedback(true);
+    if (m_combatOverlay)
+        m_combatOverlay->hide();
     if (!m_socket)
         return;
 
@@ -674,6 +758,9 @@ void ClientWindow::onLoginTimeout()
 
 void ClientWindow::onLogoutClicked()
 {
+    resetCombatFeedback(true);
+    if (m_combatOverlay)
+        m_combatOverlay->hide();
     m_loginInProgress = false;
     if (m_loginTimeoutTimer)
         m_loginTimeoutTimer->stop();
@@ -784,11 +871,111 @@ void ClientWindow::handleMessage(const QJsonObject &message)
 
 void ClientWindow::handleRobotSnapshot(const QJsonObject &message)
 {
-    updateRobots(robotInfosFromSnapshot(message));
+    const QVector<RobotManager::RobotInfo> robots = robotInfosFromSnapshot(message);
+    updateRobots(robots); // Shared HUD remains the server/client source of truth.
+    updateCombatFeedback(robots);
+}
+
+void ClientWindow::resetCombatFeedback(bool resetRoundState)
+{
+    m_ownHpTracker.reset();
+    m_opponentHpTracker.reset();
+    if (m_combatOverlay)
+        m_combatOverlay->clearFeedback();
+    if (resetRoundState) {
+        m_combatRoundRunning = false;
+        m_combatRemainingSeconds = -1;
+    }
+}
+
+void ClientWindow::layoutCombatOverlay()
+{
+    if (!m_combatOverlay || !m_controlLayer)
+        return;
+    m_combatOverlay->setGeometry(m_controlLayer->rect());
+    m_combatOverlay->setHudScale(uiScaleFactor());
+}
+
+void ClientWindow::updateCombatFeedback(const QVector<RobotManager::RobotInfo> &robots)
+{
+    if (!m_registered || !m_socket
+        || m_socket->state() != QAbstractSocket::ConnectedState
+        || (m_selectedTeam != kRedTeam && m_selectedTeam != kBlueTeam)
+        || !m_combatRoundRunning || !isMatchRunning() || roundEnded()
+        || (remainingSeconds() <= 0 && !suddenDeath())) {
+        resetCombatFeedback();
+        return;
+    }
+
+    const RobotManager::RobotInfo *own = nullptr;
+    const RobotManager::RobotInfo *opponent = nullptr;
+    const int opponentTeam = m_selectedTeam == kRedTeam ? kBlueTeam : kRedTeam;
+    for (const auto &robot : robots) {
+        if (robot.team == m_selectedTeam && robot.robotId == selectedRobotId())
+            own = &robot;
+        // Match BroadcastWindow's team representative: online first, lowest ID.
+        if (robot.team == opponentTeam
+            && (!opponent || (robot.online && !opponent->online)
+                || (robot.online == opponent->online && robot.robotId < opponent->robotId))) {
+            opponent = &robot;
+        }
+    }
+    const auto sampleFor = [](const RobotManager::RobotInfo *robot) {
+        playercombat::HpSample sample;
+        if (robot) {
+            sample.present = true;
+            sample.online = robot->online;
+            sample.linkUp = robot->linkUp;
+            sample.team = robot->team;
+            sample.robotId = robot->robotId;
+            sample.protocol = robot->protocolVersion;
+            sample.hp = robot->hp;
+            sample.address = robot->addressText.toStdString();
+        }
+        return sample;
+    };
+
+    // Without a valid local robot, an opponent change is not player feedback.
+    if (!own || !own->online || !own->linkUp || own->hp < 0
+        || (own->protocolVersion != 1 && own->protocolVersion != 2)) {
+        resetCombatFeedback();
+        return;
+    }
+    const playercombat::HpSample ownSample = sampleFor(own);
+    if (!m_ownHpTracker.hasBaselineFor(ownSample)) {
+        // A local replacement/reconnect must not inherit opponent-hit history.
+        resetCombatFeedback();
+    }
+    const int ownDamage = m_ownHpTracker.observe(ownSample);
+    const int opponentDamage = m_opponentHpTracker.observe(sampleFor(opponent));
+    if (!m_combatOverlay)
+        return;
+    // Use only our selected robot's reported heat and explicit match permission.
+    // Heat budget cannot infer a hardware interlock, power or ammunition state.
+    m_combatOverlay->setHeatTelemetry(own->heat, own->shootEnabled && own->alive && own->hp > 0);
+    if (ownDamage > 0)
+        m_combatOverlay->pulseOwnDamage();
+    if (opponentDamage > 0)
+        m_combatOverlay->pulseOpponentDamage();
+    // HP deltas contain no damage cause or shooter identity. In particular,
+    // yellow-card deductions cannot reliably be separated from real damage.
 }
 
 void ClientWindow::handleMatchState(const QJsonObject &message)
 {
+    const int seconds = message.value(QStringLiteral("remainingSeconds")).toInt(60);
+    const bool active = message.value(QStringLiteral("running")).toBool(false)
+                        && !message.value(QStringLiteral("ended")).toBool(false)
+                        && (seconds > 0 || message.value(QStringLiteral("suddenDeath")).toBool(false));
+    // There is no round ID in the wire protocol. A stopped/started transition
+    // or an increasing server clock is a conservative new-round/reset boundary.
+    if (!active || active != m_combatRoundRunning
+        || (m_combatRemainingSeconds >= 0 && seconds > m_combatRemainingSeconds)) {
+        resetCombatFeedback();
+    }
+    m_combatRoundRunning = active;
+    m_combatRemainingSeconds = seconds;
+
     const QString redName = message.value(QStringLiteral("redName")).toString();
     const QString blueName = message.value(QStringLiteral("blueName")).toString();
     if (!redName.isEmpty() || !blueName.isEmpty())
@@ -807,18 +994,31 @@ void ClientWindow::handleMatchState(const QJsonObject &message)
 
     setScores(message.value(QStringLiteral("redScore")).toInt(0),
               message.value(QStringLiteral("blueScore")).toInt(0));
+    setRefereeNotice(message.value(QStringLiteral("notice")).toString());
 
     if (!ended || settlement.isEmpty()) {
         setMatchState(message.value(QStringLiteral("remainingSeconds")).toInt(60),
-                      message.value(QStringLiteral("running")).toBool(false));
+                      message.value(QStringLiteral("running")).toBool(false),
+                      message.value(QStringLiteral("suddenDeath")).toBool(false));
         stopSettlement();
+        clearMatchSummary();
+        m_remoteSummaryExpanded = false;
         return;
     }
 
     if (!sameSettlement) {
         setMatchState(message.value(QStringLiteral("remainingSeconds")).toInt(60),
-                      message.value(QStringLiteral("running")).toBool(false));
+                      message.value(QStringLiteral("running")).toBool(false),
+                      message.value(QStringLiteral("suddenDeath")).toBool(false));
         playSettlement(localSettlement);
+    }
+    // The summary follows the settlement clip. The director's expand state
+    // is mirrored only when it changes, so a player can still toggle locally.
+    setMatchSummary(message.value(QStringLiteral("summary")).toObject());
+    const bool remoteExpanded = message.value(QStringLiteral("summaryExpanded")).toBool(false);
+    if (remoteExpanded != m_remoteSummaryExpanded) {
+        m_remoteSummaryExpanded = remoteExpanded;
+        setSummaryExpanded(remoteExpanded);
     }
 }
 
@@ -1105,30 +1305,38 @@ void ClientWindow::startVideoPreview()
     m_captureSession->setCamera(m_camera);
     m_captureSession->setVideoSink(m_videoSink);
 
-    // Ask the camera for a 1280x720 feed so onCameraFrame is a cheap
-    // pass-through. Qt6 calls this a QCameraFormat (not QVideoFrameFormat).
-    // If no 720p mode is advertised we keep the device's default format and
-    // let onCameraFrame do a cheap per-frame rescale instead.
+    // Keep 1280x720, but do not impose an artificial frame-rate cap here.
+    // Pick the highest advertised frame rate and pass that rate to FFmpeg.
     {
         const auto formats = selected.videoFormats();
-        QCameraFormat preferred;
-        for (const auto &fmt : formats) {
-            if (fmt.resolution() == QSize(1280, 720)
-                && fmt.pixelFormat() == QVideoFrameFormat::Format_ARGB8888) {
-                preferred = fmt;
-                break;
-            }
-        }
-        if (preferred.isNull()) {
-            for (const auto &fmt : formats) {
-                if (fmt.resolution() == QSize(1280, 720)) {
-                    preferred = fmt;
-                    break;
+        const auto chooseFormat = [&formats](bool requireArgb) {
+            QCameraFormat best;
+            for (const QCameraFormat &format : formats) {
+                if (format.resolution() != QSize(1280, 720))
+                    continue;
+                if (requireArgb
+                    && format.pixelFormat() != QVideoFrameFormat::Format_ARGB8888) {
+                    continue;
+                }
+                if (best.isNull()
+                    || format.maxFrameRate() > best.maxFrameRate()
+                    || (format.maxFrameRate() == best.maxFrameRate()
+                        && requireArgb
+                        && best.pixelFormat() != QVideoFrameFormat::Format_ARGB8888)) {
+                    best = format;
                 }
             }
-        }
-        if (!preferred.isNull())
+            return best;
+        };
+
+        QCameraFormat preferred = chooseFormat(true);
+        if (preferred.isNull())
+            preferred = chooseFormat(false);
+        if (!preferred.isNull()) {
+            if (preferred.maxFrameRate() > 0)
+                m_streamInputFps = qBound(1, qRound(preferred.maxFrameRate()), 120);
             m_camera->setCameraFormat(preferred);
+        }
     }
 
     connect(m_videoSink, &QVideoSink::videoFrameChanged,
@@ -1228,16 +1436,21 @@ void ClientWindow::startStreaming()
         QStringLiteral("-f"), QStringLiteral("rawvideo"),
         QStringLiteral("-pixel_format"), QStringLiteral("bgra"),
         QStringLiteral("-video_size"), QStringLiteral("1280x720"),
-        QStringLiteral("-framerate"), QStringLiteral("30"),
+        QStringLiteral("-framerate"), QString::number(m_streamInputFps),
+        QStringLiteral("-use_wallclock_as_timestamps"), QStringLiteral("1"),
         QStringLiteral("-i"), QStringLiteral("pipe:0"),
         QStringLiteral("-an"),
+        // The server renders this stream at 640x360. Encoding at 960x540 is
+        // visually sufficient there and materially reduces x264 CPU and UDP
+        // packet pressure compared with 720p.
+        QStringLiteral("-vf"), QStringLiteral("scale=960:540:flags=fast_bilinear"),
         QStringLiteral("-c:v"), QStringLiteral("libx264"),
         QStringLiteral("-preset"), QStringLiteral("ultrafast"),
         QStringLiteral("-tune"), QStringLiteral("zerolatency"),
         QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
-        QStringLiteral("-b:v"), QStringLiteral("3500k"),
-        QStringLiteral("-maxrate"), QStringLiteral("3500k"),
-        QStringLiteral("-bufsize"), QStringLiteral("7000k"),
+        QStringLiteral("-b:v"), QStringLiteral("2500k"),
+        QStringLiteral("-maxrate"), QStringLiteral("2500k"),
+        QStringLiteral("-bufsize"), QStringLiteral("5000k"),
         QStringLiteral("-g"), QStringLiteral("30"),
         QStringLiteral("-keyint_min"), QStringLiteral("30"),
         QStringLiteral("-sc_threshold"), QStringLiteral("0"),
@@ -1280,9 +1493,22 @@ void ClientWindow::onCameraFrame(const QVideoFrame &frame)
 {
     if (!frame.isValid())
         return;
+    const qint64 frameNow = QDateTime::currentMSecsSinceEpoch();
     const QImage image = frame.toImage();
     if (image.isNull())
         return;
+    ++m_framesSinceStats;
+    const qint64 statsNow = frameNow;
+    if (m_registered && statsNow - m_lastFrameStatsMs >= 2000) {
+        const qint64 elapsed = m_lastFrameStatsMs > 0 ? statsNow - m_lastFrameStatsMs : 2000;
+        qInfo().noquote()
+            << QStringLiteral("视频帧率约 %1 FPS，推流积压 %2 KB，累计丢帧 %3")
+                   .arg(m_framesSinceStats * 1000.0 / elapsed, 0, 'f', 1)
+                   .arg(m_streamProcess ? m_streamProcess->bytesToWrite() / 1024 : 0)
+                   .arg(m_streamFramesDropped);
+        m_lastFrameStatsMs = statsNow;
+        m_framesSinceStats = 0;
+    }
     m_lastVideoFrame = image;
     showFramePreview(image);
     if (m_registered && !m_activeSourceId.isEmpty())
@@ -1293,11 +1519,31 @@ void ClientWindow::onCameraFrame(const QVideoFrame &frame)
     // we only convert when the format differs from ARGB32 or the size is not
     // 1280x720 — in the common case this is a single memcpy into the pipe.
     if (m_streamProcess && m_streamProcess->state() == QProcess::Running) {
-        const bool needsConvert = image.format() != QImage::Format_ARGB32;
+        const bool bgraCompatible = image.format() == QImage::Format_ARGB32
+                                    || image.format() == QImage::Format_RGB32
+                                    || image.format() == QImage::Format_ARGB32_Premultiplied;
+        const bool needsConvert = !bgraCompatible;
         const bool needsScale = image.width() != 1280 || image.height() != 720;
+        const qint64 maxQueuedBytes = qint64(1280) * 720 * 4 * 2;
+        if (m_streamProcess->bytesToWrite() > maxQueuedBytes) {
+            ++m_streamFramesDropped;
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (now - m_lastStreamDropLogMs >= 1000) {
+                m_lastStreamDropLogMs = now;
+                qWarning().noquote()
+                    << QStringLiteral("推流队列拥塞，已丢弃 %1 帧，当前积压 %2 KB")
+                           .arg(m_streamFramesDropped)
+                           .arg(m_streamProcess->bytesToWrite() / 1024);
+            }
+            return;
+        }
         if (!needsConvert && !needsScale) {
-            m_streamProcess->write(reinterpret_cast<const char *>(image.constBits()),
-                                   image.sizeInBytes());
+            const qint64 written = m_streamProcess->write(
+                reinterpret_cast<const char *>(image.constBits()),
+                image.sizeInBytes());
+            if (written != image.sizeInBytes())
+                qWarning().noquote() << QStringLiteral("推流写入不完整: %1/%2")
+                                            .arg(written).arg(image.sizeInBytes());
         } else {
             QImage rgba = needsConvert
                               ? image.convertToFormat(QImage::Format_ARGB32)
@@ -1305,8 +1551,12 @@ void ClientWindow::onCameraFrame(const QVideoFrame &frame)
             if (needsScale)
                 rgba = rgba.scaled(1280, 720, Qt::IgnoreAspectRatio,
                                    Qt::FastTransformation);
-            m_streamProcess->write(reinterpret_cast<const char *>(rgba.constBits()),
-                                   rgba.sizeInBytes());
+            const qint64 written = m_streamProcess->write(
+                reinterpret_cast<const char *>(rgba.constBits()),
+                rgba.sizeInBytes());
+            if (written != rgba.sizeInBytes())
+                qWarning().noquote() << QStringLiteral("推流写入不完整: %1/%2")
+                                            .arg(written).arg(rgba.sizeInBytes());
         }
     }
 }
@@ -1413,10 +1663,18 @@ QVector<RobotManager::RobotInfo> ClientWindow::robotInfosFromSnapshot(
         robot.team = static_cast<quint8>(team);
         robot.hp = object.value(QStringLiteral("hp")).toInt(-1);
         robot.heat = object.value(QStringLiteral("heat")).toInt(-1);
+        const int protocol = object.value(QStringLiteral("protocolVersion")).toInt(0);
+        robot.protocolVersion = static_cast<quint8>(protocol == 1 || protocol == 2
+                                                       ? protocol : 0);
+        robot.power = object.value(QStringLiteral("power")).toInt(-1);
+        robot.powerOn = object.value(QStringLiteral("powerOn")).toBool(false);
+        robot.linkUp = object.value(QStringLiteral("linkUp")).toBool(true);
+        robot.componentOnline = static_cast<quint8>(
+            object.value(QStringLiteral("componentOnline")).toInt(0));
         robot.alive = object.value(QStringLiteral("alive")).toBool(true);
         robot.shootEnabled = object.value(QStringLiteral("shootEnabled")).toBool(true);
         robot.online = object.value(QStringLiteral("online")).toBool(false);
-        robot.addr = QHostAddress(object.value(QStringLiteral("address")).toString());
+        robot.addressText = object.value(QStringLiteral("address")).toString();
         robots.append(robot);
     }
     return robots;
@@ -1424,6 +1682,9 @@ QVector<RobotManager::RobotInfo> ClientWindow::robotInfosFromSnapshot(
 
 void ClientWindow::closeEvent(QCloseEvent *event)
 {
+    resetCombatFeedback(true);
+    if (m_combatOverlay)
+        m_combatOverlay->hide();
     stopVideoPreview();
     stopSettlement();
     if (m_socket && m_socket->state() != QAbstractSocket::UnconnectedState)
@@ -1434,19 +1695,26 @@ void ClientWindow::closeEvent(QCloseEvent *event)
 void ClientWindow::resizeEvent(QResizeEvent *event)
 {
     BroadcastWindow::resizeEvent(event);
+    applyClientUiScale();
+    layoutCombatOverlay();
+    // QMainWindow's central layout can settle after this resizeEvent. Align
+    // the player overlay once more afterwards, rather than retaining the old
+    // interactionLayer rectangle (and thus an off-center reticle).
+    QTimer::singleShot(0, this, [this] { layoutCombatOverlay(); });
     if (m_registrationOverlay && centralWidget()) {
         m_registrationOverlay->setGeometry(centralWidget()->rect());
         if (m_registrationOverlay->isVisible())
             m_registrationOverlay->raise();
     }
 
-    const auto resizePreview = [](QLabel *preview) {
+    const auto resizePreview = [this](QLabel *preview) {
         if (!preview || preview->width() <= 0)
             return;
-        const int height = qBound(158, qRound(preview->width() * 9.0 / 16.0),
+        const int minHeight = qMax(1, qRound(158 * m_clientUiScale));
+        const int height = qBound(minHeight, qRound(preview->width() * 9.0 / 16.0),
                                   preview->maximumHeight() > 0
                                       ? preview->maximumHeight()
-                                      : 405);
+                                      : qRound(405 * m_clientUiScale));
         preview->setFixedHeight(height);
     };
     resizePreview(m_registrationPreview);
@@ -1454,4 +1722,52 @@ void ClientWindow::resizeEvent(QResizeEvent *event)
     if (m_lastVideoFrame.isNull())
         return;
     showFramePreview(m_lastVideoFrame);
+}
+
+void ClientWindow::applyClientUiScale()
+{
+    const qreal scale = uiScaleFactor();
+    if (qAbs(scale - m_clientUiScale) < 0.01)
+        return;
+    m_clientUiScale = scale;
+
+    const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    if (m_registrationOverlay) {
+        m_registrationOverlay->setStyleSheet(registrationStyleSheet(scale));
+        if (QLayout *root = m_registrationOverlay->layout())
+            root->setContentsMargins(px(24), px(24), px(24), px(24));
+        if (QFrame *card = m_registrationOverlay->findChild<QFrame *>(
+                QStringLiteral("registrationCard"))) {
+            card->setMaximumWidth(px(820));
+        }
+        if (QLabel *title = m_registrationOverlay->findChild<QLabel *>(
+                QStringLiteral("registrationTitle"))) {
+            QFont font = title->font();
+            font.setPointSizeF(qMax(1.0, 24.0 * scale));
+            title->setFont(font);
+        }
+    }
+    if (m_registrationPreview) {
+        m_registrationPreview->setMinimumSize(px(280), px(158));
+        m_registrationPreview->setMaximumSize(px(720), px(405));
+    }
+    if (m_controlLayer) {
+        m_controlLayer->setStyleSheet(controlLayerStyleSheet(scale));
+        if (QLayout *root = m_controlLayer->layout()) {
+            root->setContentsMargins(px(26), px(24), px(26), px(24));
+            root->setSpacing(px(10));
+        }
+    }
+    if (m_controlPanel) {
+        m_controlPanel->setMinimumWidth(px(360));
+        m_controlPanel->setMaximumWidth(px(520));
+    }
+    if (m_videoPreview) {
+        m_videoPreview->setMinimumSize(px(280), px(158));
+        m_videoPreview->setMaximumSize(px(480), px(270));
+    }
+    if (m_log) {
+        m_log->setMinimumHeight(px(54));
+        m_log->setMaximumHeight(px(120));
+    }
 }

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "@PROJECT_VERSION@",
+  "buildId": "@SCOMP_BUILD_ID@",
+  "buildTimestampUtc": "@SCOMP_BUILD_TIMESTAMP@",
+  "timestampSource": "build-session-start",
+  "platform": "@SCOMP_ARTIFACT_PLATFORM@",
+  "configuration": "@SCOMP_ARTIFACT_CONFIG@",
+  "compiler": "@CMAKE_CXX_COMPILER_ID@",
+  "compilerVersion": "@CMAKE_CXX_COMPILER_VERSION@",
+  "qtVersion": "@Qt6_VERSION@",
+  "gitRevision": "@SCOMP_GIT_REVISION@",
+  "gitDirty": "@SCOMP_GIT_DIRTY@"
+}

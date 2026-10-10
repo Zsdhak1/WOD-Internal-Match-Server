@@ -2,6 +2,9 @@
 #include "protocol.h"
 
 #include <QDateTime>
+#include <QHostAddress>
+#include <QRandomGenerator>
+#include <QSettings>
 #include <QUdpSocket>
 
 namespace {
@@ -35,18 +38,39 @@ RobotCommander::RobotCommander(QUdpSocket *uplinkSocket, QObject *parent)
     m_retryTimer->start();
 }
 
-void RobotCommander::learnEndpoint(quint8 robotId, const QHostAddress &ip,
+void RobotCommander::learnEndpoint(quint8 robotId, quint32 ipv4,
                                    quint16 port)
 {
-    m_endpoints.insert(robotId, {ip, port});
+    if (robotId != 0 && ipv4 != 0)
+        m_endpoints.insert(robotId, {ipv4, port});
 }
 
 quint32 RobotCommander::allocateTxid()
 {
-    // ESP32 要求非 0 transaction_id
-    const quint32 id = m_nextTxid;
-    m_nextTxid = (m_nextTxid + 1 == 0) ? 1 : m_nextTxid + 1;
+    // Devices remember completed commands across server restarts. Persist
+    // before sending so a new command cannot accidentally replay an old ID.
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("RobotCommands"));
+    quint32 id = settings.value(QStringLiteral("lastTxid"),
+                               QRandomGenerator::global()->generate()).toUInt() + 1u;
+    if (!id) id = 1;
+    settings.setValue(QStringLiteral("lastTxid"), id);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        emit logMessage(QStringLiteral("[下行] 无法保存事务号，命令未发送"));
+        return 0;
+    }
     return id;
+}
+
+void RobotCommander::forgetEndpoint(quint8 robotId)
+{
+    m_endpoints.remove(robotId);
+}
+
+void RobotCommander::cancelPending()
+{
+    m_pending.clear();
 }
 
 quint32 RobotCommander::sendCommand(quint8 type, quint8 targetId,
@@ -55,37 +79,11 @@ quint32 RobotCommander::sendCommand(quint8 type, quint8 targetId,
     if (!m_uplink || datagram.isEmpty())
         return 0;
 
-    // 广播命令：targetId=0 时发送到所有已知端点
+    // 最新 V2 明确不支持比赛控制广播，所有业务命令必须指定 robot_id。
     if (targetId == 0) {
-        if (m_endpoints.isEmpty()) {
-            emit logMessage(QStringLiteral("[下行] %1 广播失败：无已知 ESP32 端点")
-                                .arg(typeName(type)));
-            return 0;
-        }
-        // 广播命令也用同一个 txid，ESP32 各自回 ACK；我们按 robotId 区分
-        const quint32 txid = allocateTxid();
-        for (auto it = m_endpoints.constBegin(); it != m_endpoints.constEnd(); ++it) {
-            const QHostAddress &ip = it->first;
-            const quint16 port = it->second;
-            m_uplink->writeDatagram(datagram, ip, port);
-            if (needsAck) {
-                Pending p;
-                p.datagram = datagram;
-                p.type = type;
-                p.targetId = it.key();   // 实际目标 robotId
-                p.ip = ip;
-                p.port = port;
-                p.attempts = 1;
-                p.deadlineMs = QDateTime::currentMSecsSinceEpoch() + kCommandTimeoutMs;
-                // 广播时每车一个 pending 项，key 为 (txid << 8 | robotId)
-                m_pending.insert((txid << 8) | it.key(), p);
-            }
-        }
-        emit logMessage(QStringLiteral("[下行] %1 广播到 %2 台 ESP32 (txid=%3)")
-                            .arg(typeName(type))
-                            .arg(m_endpoints.size())
-                            .arg(txid));
-        return txid;
+        emit logMessage(QStringLiteral("[下行] %1 被拒绝：最新 V2 不支持广播")
+                            .arg(typeName(type)));
+        return 0;
     }
 
     // 单播命令
@@ -96,16 +94,48 @@ quint32 RobotCommander::sendCommand(quint8 type, quint8 targetId,
         return 0;
     }
 
-    const quint32 txid = allocateTxid();
-    m_uplink->writeDatagram(datagram, ep->first, ep->second);
+    return sendCommandTo(type, targetId, ep->first, ep->second, datagram, needsAck);
+}
+
+quint32 RobotCommander::sendCommandTo(quint8 type, quint8 targetId, quint32 ipv4,
+                                      quint16 port, const QByteArray &datagram,
+                                      bool needsAck)
+{
+    if (!m_uplink || m_uplink->state() != QAbstractSocket::BoundState
+        || ipv4 == 0 || port == 0 || datagram.isEmpty())
+        return 0;
+
+    const QHostAddress address(ipv4);
+    quint32 txid = 0;
+    if (needsAck) {
+        const int txidOffset = type == proto::TypeSetHp ? 7
+                               : type == proto::TypeAssignment ? 17 : 5;
+        if (datagram.size() < txidOffset + 4)
+            return 0;
+        txid = static_cast<quint32>(static_cast<quint8>(datagram.at(txidOffset)))
+              | (static_cast<quint32>(static_cast<quint8>(datagram.at(txidOffset + 1))) << 8)
+              | (static_cast<quint32>(static_cast<quint8>(datagram.at(txidOffset + 2))) << 16)
+              | (static_cast<quint32>(static_cast<quint8>(datagram.at(txidOffset + 3))) << 24);
+        if (txid == 0)
+            return 0;
+    }
+
+    const qint64 written = m_uplink->writeDatagram(datagram, address, port);
+    if (written != datagram.size()) {
+        qWarning().noquote()
+            << QStringLiteral("[下行] %1 到机器人%2 @%3:%4 发送失败: %5")
+                   .arg(typeName(type)).arg(targetId).arg(address.toString())
+                   .arg(port).arg(m_uplink->errorString());
+        return 0;
+    }
 
     if (needsAck) {
         Pending p;
         p.datagram = datagram;
         p.type = type;
         p.targetId = targetId;
-        p.ip = ep->first;
-        p.port = ep->second;
+        p.ipv4 = ipv4;
+        p.port = port;
         p.attempts = 1;
         p.deadlineMs = QDateTime::currentMSecsSinceEpoch() + kCommandTimeoutMs;
         m_pending.insert(txid, p);
@@ -114,8 +144,8 @@ quint32 RobotCommander::sendCommand(quint8 type, quint8 targetId,
     emit logMessage(QStringLiteral("[下行] %1 -> 机器人%2 @%3:%4 (txid=%5)")
                         .arg(typeName(type))
                         .arg(targetId)
-                        .arg(ep->first.toString())
-                        .arg(ep->second)
+                        .arg(address.toString())
+                        .arg(port)
                         .arg(txid));
     return txid;
 }
@@ -166,12 +196,18 @@ quint32 RobotCommander::sendSetHp(quint8 targetId, quint16 hp)
                        proto::makeSetHp(targetId, hp, txid), true);
 }
 
-quint32 RobotCommander::sendAssignment(quint8 robotId, const QByteArray &mac6)
+quint32 RobotCommander::sendAssignment(quint32 ipv4, quint8 robotId,
+                                       const QByteArray &deviceMac6,
+                                       const QByteArray &controllerMac6)
 {
-    if (robotId == 0 || mac6.size() != 6) return 0;
+    if (robotId == 0 || deviceMac6.size() != 6 || controllerMac6.size() != 6)
+        return 0;
     const quint32 txid = allocateTxid();
-    return sendCommand(proto::TypeAssignment, robotId,
-                       proto::makeAssignment(robotId, mac6, txid), true);
+    return sendCommandTo(proto::TypeAssignment, robotId, ipv4,
+                         proto::kDownlinkPort,
+                         proto::makeAssignment(robotId, deviceMac6,
+                                               controllerMac6, txid),
+                         true);
 }
 
 quint32 RobotCommander::sendStatusRequest(quint8 targetId)
@@ -184,31 +220,21 @@ quint32 RobotCommander::sendStatusRequest(quint8 targetId)
 void RobotCommander::onAck(quint8 ackedType, quint32 txid, quint8 result,
                            quint8 robotId)
 {
-    // 单播命令的 pending key 就是 txid
+    // 单播命令的 pending key 就是 txid。ACK 结构没有 robot_id，因此必须从
+    // pending 记录中恢复目标 robot_id，不能使用 ACK 解码出的默认值 0。
     auto it = m_pending.find(txid);
-    if (it != m_pending.end()) {
+    if (it != m_pending.end() && it->type == ackedType) {
+        const quint8 targetId = it->targetId;
         m_pending.erase(it);
-        emit commandAcked(txid, ackedType, result, robotId);
+        emit commandAcked(txid, ackedType, result, targetId);
         emit logMessage(QStringLiteral("[ACK] %1 机器人%2 返回 result=%3 (txid=%4)")
                             .arg(typeName(ackedType))
-                            .arg(robotId)
+                            .arg(targetId)
                             .arg(result)
                             .arg(txid));
         return;
     }
-
-    // 广播命令的 pending key 是 (txid << 8 | robotId)
-    const quint32 bkey = (txid << 8) | robotId;
-    it = m_pending.find(bkey);
-    if (it != m_pending.end()) {
-        m_pending.erase(it);
-        emit commandAcked(txid, ackedType, result, robotId);
-        emit logMessage(QStringLiteral("[ACK] %1 机器人%2 返回 result=%3 (txid=%4, 广播)")
-                            .arg(typeName(ackedType))
-                            .arg(robotId)
-                            .arg(result)
-                            .arg(txid));
-    }
+    Q_UNUSED(robotId);
 }
 
 void RobotCommander::onRetryTick()
@@ -221,22 +247,29 @@ void RobotCommander::onRetryTick()
             continue;
         if (p.attempts >= kMaxAttempts) {
             toRemove.append(it.key());
-            emit commandTimeout(it.key() & 0xFFFFFF00, p.type, p.targetId);
+            emit commandTimeout(it.key(), p.type, p.targetId);
             emit logMessage(QStringLiteral("[超时] %1 机器人%2 未收到 ACK (txid=%3)")
                                 .arg(typeName(p.type))
                                 .arg(p.targetId)
-                                .arg(it.key() & 0xFFFFFF00));
+                                .arg(it.key()));
             continue;
         }
         // 用相同 txid 重发
-        m_uplink->writeDatagram(p.datagram, p.ip, p.port);
+        const qint64 written = m_uplink->writeDatagram(
+            p.datagram, QHostAddress(p.ipv4), p.port);
+        if (written != p.datagram.size()) {
+            qWarning().noquote()
+                << QStringLiteral("[重传] %1 机器人%2 写入失败: %3")
+                       .arg(typeName(p.type)).arg(p.targetId)
+                       .arg(m_uplink->errorString());
+        }
         ++p.attempts;
         p.deadlineMs = now + kRetryIntervalMs;
         emit logMessage(QStringLiteral("[重传] %1 机器人%2 第%3次 (txid=%4)")
                             .arg(typeName(p.type))
                             .arg(p.targetId)
                             .arg(p.attempts)
-                            .arg(it.key() & 0xFFFFFF00));
+                            .arg(it.key()));
     }
     for (quint32 key : toRemove)
         m_pending.remove(key);

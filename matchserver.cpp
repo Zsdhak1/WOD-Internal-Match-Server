@@ -153,6 +153,8 @@ bool MatchServer::startVideoSockets()
             stopVideoSockets();
             return false;
         }
+        socket->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption,
+                                4 * 1024 * 1024);
         m_videoSockets.insert(team, socket);
         connect(socket, &QUdpSocket::readyRead, this, [this, team] {
             onVideoReadyRead(team);
@@ -201,12 +203,18 @@ void MatchServer::onVideoReadyRead(quint8 team)
         // packets at once rather than dribbling bytes into a full pipe. TS
         // packets are self-contained 188-byte cells so we can discard any
         // prefix safely — the decoder will resync at the next sync byte.
-        if (decoder->bytesToWrite() >= 512 * 1024) {
-            // Decoder is >0.5MB behind. Drop the backlog to the most recent
-            // ~64KB so we recover at the next GOP instead of smearing stale
-            // P-frames across the stream.
+        if (decoder->bytesToWrite() >= 128 * 1024) {
+            // A raw MPEG-TS pipe cannot be flushed in place. Restart the
+            // decoder so packets already queued in QProcess do not keep the
+            // display permanently behind the live edge.
             const QByteArray pending = socket->readAll();
             Q_UNUSED(pending);
+            emit logMessage(tr("%1 方视频解码延迟过大，重启解码器以清除积压")
+                                .arg(team == kRedTeam ? tr("红") : tr("蓝")));
+            m_videoDecoders.remove(team);
+            m_videoBuffers.remove(team);
+            decoder->kill();
+            decoder->deleteLater();
             break;
         }
         decoder->write(datagram.data());
@@ -260,13 +268,16 @@ void MatchServer::startVideoDecoder(quint8 team)
         QStringLiteral("-loglevel"), QStringLiteral("error"),
         QStringLiteral("-fflags"), QStringLiteral("nobuffer"),
         QStringLiteral("-flags"), QStringLiteral("low_delay"),
+        QStringLiteral("-probesize"), QStringLiteral("32"),
+        QStringLiteral("-analyzeduration"), QStringLiteral("0"),
+        QStringLiteral("-threads"), QStringLiteral("1"),
         QStringLiteral("-f"), QStringLiteral("mpegts"),
         QStringLiteral("-i"), QStringLiteral("pipe:0"),
         QStringLiteral("-an"),
         QStringLiteral("-f"), QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
         QStringLiteral("-s"), QStringLiteral("%1x%2").arg(kVideoWidth).arg(kVideoHeight),
-        QStringLiteral("-r"), QStringLiteral("20"),
+        QStringLiteral("-vsync"), QStringLiteral("0"),
         QStringLiteral("pipe:1")
     });
 }
@@ -306,10 +317,9 @@ void MatchServer::consumeVideoOutput(quint8 team)
     if (completeBytes <= 0)
         return;
 
-    const QByteArray frameBytes = buffer.mid(completeBytes - kVideoBytesPerFrame,
-                                             kVideoBytesPerFrame);
-    buffer.remove(0, completeBytes);
-    const QImage latestFrame(reinterpret_cast<const uchar *>(frameBytes.constData()),
+    const int frameOffset = completeBytes - kVideoBytesPerFrame;
+    const QImage latestFrame(reinterpret_cast<const uchar *>(buffer.constData())
+                                 + frameOffset,
                              kVideoWidth, kVideoHeight, QImage::Format_ARGB32);
 
     QString sourceId;
@@ -318,10 +328,11 @@ void MatchServer::consumeVideoOutput(quint8 team)
     if (session != m_sessions.constEnd())
         sourceId = session->sourceId;
     if (!sourceId.isEmpty()) {
-        // latestFrame is a non-owning view over frameBytes. Detach before the
+        // latestFrame is a non-owning view over buffer. Detach before the
         // receiver can retain the image after this function returns.
         emit videoFrameReceived(sourceId, latestFrame.copy());
     }
+    buffer.remove(0, completeBytes);
 }
 
 bool MatchServer::isListening() const
@@ -361,6 +372,11 @@ void MatchServer::onSocketReadyRead(QTcpSocket *socket)
     }
 
     while (true) {
+        // Processing logout can synchronously emit disconnected and erase the
+        // session; never reuse an iterator across processMessage().
+        it = m_sessions.find(socket);
+        if (it == m_sessions.end())
+            return;
         const int newline = it->buffer.indexOf('\n');
         if (newline < 0)
             break;
@@ -554,10 +570,15 @@ QJsonObject MatchServer::makeRobotSnapshot(const QVector<RobotManager::RobotInfo
             {QStringLiteral("teamName"), teamName(robot.team)},
             {QStringLiteral("hp"), robot.hp},
             {QStringLiteral("heat"), robot.heat},
+            {QStringLiteral("protocolVersion"), robot.protocolVersion},
+            {QStringLiteral("power"), robot.power},
+            {QStringLiteral("powerOn"), robot.powerOn},
+            {QStringLiteral("linkUp"), robot.linkUp},
+            {QStringLiteral("componentOnline"), robot.componentOnline},
             {QStringLiteral("alive"), robot.alive},
             {QStringLiteral("shootEnabled"), robot.shootEnabled},
             {QStringLiteral("online"), robot.online},
-            {QStringLiteral("address"), robot.addr.toString()}
+            {QStringLiteral("address"), robot.addressText}
         };
         array.append(robotObject);
     }

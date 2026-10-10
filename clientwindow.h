@@ -2,6 +2,7 @@
 #define CLIENTWINDOW_H
 
 #include "broadcastwindow.h"
+#include "playercombatoverlay.h"
 
 #include <QColor>
 #include <QPair>
@@ -33,6 +34,7 @@ class ClientWindow : public BroadcastWindow
 
 public:
     explicit ClientWindow(QWidget *parent = nullptr);
+    ~ClientWindow() override;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -57,6 +59,7 @@ private slots:
 
 private:
     void buildUi();
+    void applyClientUiScale();
     void buildRegistrationOverlay();
     void buildControlLayer();
     void showLoginPage();
@@ -65,6 +68,9 @@ private:
     void handleMessage(const QJsonObject &message);
     void handleRobotSnapshot(const QJsonObject &message);
     void handleMatchState(const QJsonObject &message);
+    void resetCombatFeedback(bool resetRoundState = false);
+    void updateCombatFeedback(const QVector<RobotManager::RobotInfo> &robots);
+    void layoutCombatOverlay();
     void appendLog(const QString &message);
     void refreshVideoDevices();
     void populateVideoCombo(QComboBox *combo, const QString &selectedId = QString());
@@ -97,15 +103,27 @@ private:
     QProcess *m_streamProcess = nullptr;
     QByteArray m_readBuffer;
     QImage m_lastVideoFrame;
+    qint64 m_lastStreamDropLogMs = 0;
+    qint64 m_lastFrameStatsMs = 0;
+    quint64 m_streamFramesDropped = 0;
+    quint64 m_framesSinceStats = 0;
+    int m_streamInputFps = 30;
     QVector<QPair<QString, QString>> m_videoDevices;
     bool m_registered = false;
     bool m_loginInProgress = false;
+    qreal m_clientUiScale = 1.0;
     int m_selectedTeam = 0;
     int m_selectedRobotId = 1;
     QString m_displayName;
     QString m_activeSourceId;
     QString m_activeSourceName;
     quint16 m_videoPort = 0;
+
+    PlayerCombatOverlay *m_combatOverlay = nullptr;
+    playercombat::HpTracker m_ownHpTracker;
+    playercombat::HpTracker m_opponentHpTracker;
+    bool m_combatRoundRunning = false;
+    int m_combatRemainingSeconds = -1;
 
     QWidget *m_registrationOverlay = nullptr;
     QWidget *m_controlLayer = nullptr;
@@ -129,6 +147,7 @@ private:
     QLabel *m_videoPreview = nullptr;
     QLabel *m_videoStatus = nullptr;
     QPlainTextEdit *m_log = nullptr;
+    bool m_remoteSummaryExpanded = false;
 };
 
 #endif // CLIENTWINDOW_H

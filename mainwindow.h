@@ -1,10 +1,16 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include "matchreferee.h"
 #include "matchserver.h"
 
+#include <QElapsedTimer>
 #include <QMainWindow>
 
+class CheckinPanel;
+class FieldCamera;
+class FieldCameraBackend;
+class QCheckBox;
 class QGroupBox;
 class QHBoxLayout;
 class QUdpSocket;
@@ -18,20 +24,24 @@ class QPlainTextEdit;
 class QComboBox;
 class QLineEdit;
 class QScreen;
+class QResizeEvent;
+class QSplitter;
 class QSpinBox;
 class QTableWidget;
 class QTimer;
+class ResponsiveUiScaler;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr);
+    explicit MainWindow(QWidget *parent = nullptr, FieldCameraBackend *cameraBackend = nullptr);
     ~MainWindow() override;
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private slots:
     void onReadyRead();
@@ -44,7 +54,18 @@ private slots:
     void onTerminateMatch();
     void onResetMatch();
     void onTestVictoryAnimation();
+    // Automatic verdict
+    void onTimeExpired();
+    void onRefereeTick();
+    void onDeclareRedWin();
+    void onDeclareBlueWin();
+    void onToggleSummary();
+    void onRefereeRulesChanged();
     void onToggleClientServer();
+    void refreshFieldCameraDevices();
+    void onToggleFieldCamera();
+    void onFieldCameraSelected();
+    void onFieldCameraStateChanged();
     void onProgramModeChanged(int index);
     void onProgramSourceChanged(int index);
     void onAutoSwitchTimeout();
@@ -64,7 +85,7 @@ private slots:
     void onReliableEventNeedsAck(quint8 robotId, quint8 type, quint32 txid,
                                  const QHostAddress &addr, quint16 port);
     void onRobotAck(quint8 ackedType, quint32 txid, quint8 result, quint8 robotId);
-    void onEndpointLearned(quint8 robotId, const QHostAddress &ip, quint16 port);
+    void onEndpointLearned(quint8 robotId, quint32 ipv4, quint16 port);
     // V2 设备管理
     void onAssignTeam();
     void onForcePowerOn();
@@ -79,7 +100,20 @@ private slots:
     void onLoadLayout();
 
 private:
+    struct PendingAssignment {
+        quint8 robotId = 0;
+        quint8 team = 0;
+        QString deviceMac;
+    };
+    QHash<quint32, PendingAssignment> m_pendingAssignments;
     void buildUi();
+    void loadRefereeRules();
+    void applyVerdict();
+    void sendGameCommand(bool start);
+    void refreshRefereeStatus();
+    void syncRefereeState();
+    qint64 refereeNow() const { return m_refereeClock.elapsed(); }
+    void applyResponsiveUi();
     void startListen();
     void stopListen();
     void updateListenInfo();
@@ -91,6 +125,7 @@ private:
     void rebuildSourcePreviewStrip();
     void refreshSourcePreviewBadges();
     void refreshLayoutPositionEditors();
+    void refreshDeviceList();
     bool importTeamTable(const QString &filePath, QString *errorMessage);
     void updateTeamPairControls();
     void applyTeamPair(int index, bool resetMatch);
@@ -129,6 +164,11 @@ private:
     QPushButton    *m_redCardBtn = nullptr;
     QPushButton    *m_yellowCardBtn = nullptr;
     QPushButton    *m_clearCardsBtn = nullptr;
+    CheckinPanel   *m_checkinPanel = nullptr;
+    FieldCamera    *m_fieldCamera = nullptr;
+    QComboBox      *m_fieldCameraEdit = nullptr;
+    QPushButton   *m_fieldCameraToggle = nullptr;
+    QLabel        *m_fieldCameraStatus = nullptr;
     QComboBox      *m_programModeEdit = nullptr;
     QComboBox      *m_programSourceEdit = nullptr;
     QSpinBox       *m_autoSwitchIntervalEdit = nullptr;
@@ -145,6 +185,11 @@ private:
     QPushButton    *m_saveLayoutBtn = nullptr;
     QPushButton    *m_loadLayoutBtn = nullptr;
     QTimer         *m_autoSwitchTimer = nullptr;
+    QSplitter      *m_workspace = nullptr;
+    QSplitter      *m_statusSplitter = nullptr;
+    ResponsiveUiScaler *m_uiScaler = nullptr;
+    qreal           m_controlUiScale = 1.0;
+    Qt::Orientation m_workspaceOrientation = Qt::Horizontal;
     QGroupBox      *m_sourcePreviewGroup = nullptr;
     QHBoxLayout    *m_sourcePreviewLayout = nullptr;
     // sourceId -> preview QLabel. Rebuilt whenever the source list changes.
@@ -153,6 +198,8 @@ private:
     QSpinBox       *m_deviceRobotEdit = nullptr;
     QComboBox      *m_deviceTeamEdit = nullptr;
     QSpinBox       *m_deviceHpEdit = nullptr;
+    QComboBox      *m_deviceSelectEdit = nullptr;
+    QLineEdit      *m_deviceControllerMacEdit = nullptr;
     QVector<MatchServer::VideoSourceInfo> m_videoSources;
     struct TeamPair {
         QString redName;
@@ -161,6 +208,17 @@ private:
     QVector<TeamPair> m_teamPairs;
     int             m_currentTeamPairIndex = -1;
     bool            m_listening = false;
+
+    // Automatic verdict
+    MatchReferee    m_referee;
+    QElapsedTimer   m_refereeClock;
+    QTimer         *m_refereeTimer = nullptr;
+    QCheckBox      *m_redCardDisqualifiesEdit = nullptr;
+    QSpinBox       *m_offlineGraceEdit = nullptr;
+    QLabel         *m_refereeStatusLabel = nullptr;
+    QPushButton    *m_declareRedBtn = nullptr;
+    QPushButton    *m_declareBlueBtn = nullptr;
+    QPushButton    *m_summaryToggleBtn = nullptr;
 };
 
 #endif // MAINWINDOW_H

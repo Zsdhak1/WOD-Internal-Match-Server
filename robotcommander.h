@@ -20,17 +20,21 @@ public:
     explicit RobotCommander(QUdpSocket *uplinkSocket, QObject *parent = nullptr);
 
     // 由 RobotManager 在学习到 ESP32 端点时调用
-    void learnEndpoint(quint8 robotId, const QHostAddress &ip, quint16 port);
+    void learnEndpoint(quint8 robotId, quint32 ipv4, quint16 port);
+    void forgetEndpoint(quint8 robotId);
+    void cancelPending();
 
     // 所有命令都返回 transaction_id；0 表示无法发送（未知端点或 socket 不可用）。
-    // targetId=0 表示广播（仅 GAME_START/GAME_END 允许），其他必须指定 robotId。
+    // 最新 V2 不支持广播，所有业务命令都必须指定非零 robotId。
     quint32 sendGameStart(quint8 targetId);
     quint32 sendGameEnd(quint8 targetId);
     quint32 sendYellowCard(quint8 targetId);
     quint32 sendForcePowerOff(quint8 targetId);
     quint32 sendForcePowerOn(quint8 targetId);
     quint32 sendSetHp(quint8 targetId, quint16 hp);
-    quint32 sendAssignment(quint8 robotId, const QByteArray &mac6);
+    quint32 sendAssignment(quint32 ipv4, quint8 robotId,
+                           const QByteArray &deviceMac6,
+                           const QByteArray &controllerMac6);
     quint32 sendStatusRequest(quint8 targetId);   // 无 ACK
 
     // 由 RobotManager 在收到 ESP32 ACK 时调用
@@ -52,7 +56,7 @@ private:
         QByteArray   datagram;
         quint8       type = 0;
         quint8       targetId = 0;
-        QHostAddress ip;
+        quint32      ipv4 = 0;
         quint16      port = 0;
         int          attempts = 0;
         qint64       deadlineMs = 0;
@@ -60,13 +64,15 @@ private:
 
     quint32 sendCommand(quint8 type, quint8 targetId, const QByteArray &datagram,
                         bool needsAck);
+    quint32 sendCommandTo(quint8 type, quint8 targetId, quint32 ipv4,
+                          quint16 port, const QByteArray &datagram,
+                          bool needsAck);
     quint32 allocateTxid();
 
     QUdpSocket *m_uplink = nullptr;
     QHash<quint32, Pending> m_pending;
-    QHash<quint8, QPair<QHostAddress, quint16>> m_endpoints;  // robotId -> (ip, port)
+    QHash<quint8, QPair<quint32, quint16>> m_endpoints;  // robotId -> (IPv4, port)
     QTimer *m_retryTimer = nullptr;
-    quint32 m_nextTxid = 1;
 };
 
 #endif // ROBOTCOMMANDER_H

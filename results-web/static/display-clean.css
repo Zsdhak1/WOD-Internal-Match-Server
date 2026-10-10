@@ -1,0 +1,61 @@
+/* Spectator display only: competition data, no decorative microcopy. */
+.display-body {--accent:#87cbff;--blue:#9acfff;--muted:#b0bdcf;background:#070b12;isolation:isolate}
+/* Two naturally scaled halves retain BOTH outer frames at 4:3, no image stretching. */
+.display-body::before,.display-body::after {content:"";position:fixed;top:0;bottom:0;width:50%;z-index:-1;pointer-events:none;background-image:url('/assets/arena-background.jpg');background-size:auto 100%;background-repeat:no-repeat}
+.display-body::before {left:0;background-position:left center}
+.display-body::after {right:0;background-position:right center}
+.broadcast {padding:clamp(32px,3.7vh,56px) clamp(56px,6vw,154px) clamp(22px,2.5vh,38px);gap:clamp(10px,1.15vh,18px);height:100vh;height:100dvh;min-width:0}
+.broadcast-header h1 {text-shadow:0 2px 15px #000}
+.metrics {background:linear-gradient(90deg,#2b111cbb,#09111ddd 48%,#10283abb);border-color:#6886a357;border-radius:4px;box-shadow:0 8px 25px #0004}
+.metrics>div:first-child {border-top:2px solid #fa5069}
+.metrics>div:last-child {border-top:2px solid #54bfff}
+.metrics>div {padding:8px 24px;border-left-color:#7c90a645}
+.metrics>div:first-child strong {color:#ff9eab}
+.metrics>div:last-child strong {color:#91d2ff}
+.standings-panel {position:relative;isolation:isolate;background:linear-gradient(110deg,#11101bd9,#091320e6 65%);border:1px solid #7298bb69;border-radius:5px;box-shadow:0 12px 35px #0005;overflow:hidden}
+.panel-heading {background:linear-gradient(90deg,#4a152333,#0b142033 50%,#16436833);border-bottom-color:#7298bb55}
+.standings-table thead {background:#152030cc}
+.standings-table tbody tr {background:#08121c73}
+.standings-table tbody tr:nth-child(even) {background:#24364b55}
+.standings-table td {border-bottom-color:#91a8bd32}
+.standings-table .points {color:#9cd7ff;font-weight:750}
+.rank-number.top {background:linear-gradient(135deg,#65273b99,#19446b99);border-color:#87abc8;color:#fff}
+.recent-bar {background:linear-gradient(90deg,#301521d9,#0b1723dd);border-color:#9a7a925c;border-radius:4px}
+.recent-label {color:#ffb1bd}
+.page-controls button,.page-controls select {background:#0d1d2ee8;border-color:#638bb39c;border-radius:4px}
+.page-controls button:hover {background:#22456c;border-color:#9bd8ff}
+.dot.online {background:#89d4ff;box-shadow:0 0 12px #58bfff80}
+.cycle-track {background:#6a7c9633}
+#cycle-progress {background:linear-gradient(90deg,#ff506f,#66c6ff)}
+.arena-corner {position:absolute;width:clamp(64px,7vh,102px);height:clamp(64px,7vh,102px);background-image:url('/assets/arena-corners.jpg');background-size:200% 200%;mix-blend-mode:screen;opacity:.55;pointer-events:none;z-index:-1}
+.arena-corner.top-left {top:0;left:0;background-position:left top}
+.arena-corner.top-right {top:0;right:0;background-position:right top}
+.arena-corner.bottom-left {bottom:0;left:0;background-position:left bottom}
+.arena-corner.bottom-right {bottom:0;right:0;background-position:right bottom}
+@media(max-aspect-ratio:3/2){.broadcast{padding-left:clamp(48px,5vw,100px);padding-right:clamp(48px,5vw,100px)}.broadcast-footer{justify-content:center}.update-status{flex:1;justify-content:center}.page-controls{justify-content:center;width:100%}}
+
+.broadcast-header h1 {margin-top:0;font-size:clamp(32px,3.5vh,52px)}
+.connection {display:flex;font-size:clamp(18px,1.8vh,26px);font-weight:600}
+.metrics {grid-template-columns:repeat(2,minmax(0,1fr));padding:clamp(6px,.65vh,10px) 0}
+.metrics span {font-size:clamp(20px,2vh,29px);color:var(--text)}
+.metrics strong {font-size:clamp(30px,3.5vh,50px)}
+.panel-heading {padding:clamp(10px,1.1vh,16px) 24px}
+.panel-heading h2 {font-size:clamp(26px,2.6vh,38px)}
+#range-label {font-size:clamp(18px,1.8vh,26px);color:var(--text)}
+.standings-table {font-size:clamp(28px,2.9vh,42px)}
+.standings-table tbody tr {height:clamp(70px,6.5vh,94px)}
+.standings-table td {padding-top:3px;padding-bottom:3px;font-weight:600}
+.standings-table .team-name {font-size:clamp(26px,2.6vh,38px);line-height:1.08;font-weight:700}
+.standings-table thead th {height:clamp(44px,4.5vh,65px);font-size:clamp(23px,2.25vh,33px);font-weight:600;color:#d5e4f6}
+.standings-table .rank-number {font-size:clamp(23px,2.4vh,35px);min-width:44px;line-height:1.1}
+.recent-label {font-size:clamp(18px,1.8vh,26px)}
+.broadcast-footer {display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px 24px;padding-bottom:12px}
+.update-status {display:flex;align-items:center;gap:clamp(12px,1.4vw,28px);padding:14px 20px;border:1px solid #528ab2;border-left:5px solid #88b7ff;border-radius:8px;background:#12253fe6;min-width:0;color:#edf5ff}
+.update-label {font-size:clamp(20px,2vh,29px);font-weight:600;white-space:nowrap}
+#update-time {font-size:clamp(26px,2.7vh,39px);font-weight:750;font-variant-numeric:tabular-nums;letter-spacing:.04em;white-space:nowrap;color:#b7daff}
+.update-status.stale {border-color:#ff818d;border-left-color:#ff818d;background:#42202bea}
+.update-status.stale #update-time {color:#ffd2d8}
+.page-controls {font-size:clamp(17px,1.7vh,24px);gap:10px}
+.page-controls button,.page-controls select {font-size:inherit}
+.interval-label {font-size:inherit}
+@media(max-width:1550px){.broadcast-footer{gap:10px 18px}.update-status{padding:10px 14px}.page-controls{gap:7px}.page-controls button{padding:8px 10px}}

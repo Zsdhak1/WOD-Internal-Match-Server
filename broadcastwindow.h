@@ -5,6 +5,7 @@
 
 #include <QByteArray>
 #include <QImage>
+#include <QJsonObject>
 #include <QHash>
 #include <QMainWindow>
 #include <QPoint>
@@ -16,6 +17,7 @@
 class QCloseEvent;
 class QHideEvent;
 class QLabel;
+class VideoCanvas;
 class QGraphicsOpacityEffect;
 class QLayout;
 class QPropertyAnimation;
@@ -26,8 +28,10 @@ class QScreen;
 class QShowEvent;
 class QTimer;
 class QVariantAnimation;
+class QVBoxLayout;
 class QWidget;
 class TickerMarqueeWidget;
+class MatchSummaryPanel;
 
 // 独立的赛事输出窗口。视频帧作为底层画面，赛事状态作为透明叠加层显示。
 class BroadcastWindow : public QMainWindow
@@ -72,8 +76,24 @@ public:
     void startMatch();
     void pauseMatch();
     void resetMatch();
-    void setMatchState(int remainingSeconds, bool running);
+    void setMatchState(int remainingSeconds, bool running, bool suddenDeath = false);
+    bool suddenDeath() const { return m_suddenDeath; }
     void terminateMatch();
+    // Ends the round with an externally decided result (e.g. MatchReferee).
+    void concludeRound(const QString &settlementType);
+    // When disabled, reaching 00:00 only stops the clock and emits
+    // timeExpired(); the owner then decides the result. The player client
+    // uses this so its local clock can never race the server's verdict.
+    void setAutoFinishOnTimeout(bool enabled) { m_autoFinishOnTimeout = enabled; }
+    void setRefereeNotice(const QString &notice);
+    QString refereeNotice() const { return m_refereeNotice; }
+    // Post-match data panel. The panel is revealed after the settlement clip.
+    void setMatchSummary(const QJsonObject &summary);
+    void clearMatchSummary();
+    QJsonObject matchSummary() const { return m_matchSummary; }
+    bool summaryVisible() const;
+    bool summaryExpanded() const;
+    void setSummaryExpanded(bool expanded, bool animated = true);
     void playSettlement(const QString &type);
     void playSettlementPreview(const QString &type);
     void stopSettlement();
@@ -93,6 +113,8 @@ signals:
     void matchStateChanged(bool running);
     void presentationStateChanged();
     void roundFinished(const QString &settlementType);
+    void timeExpired();
+    void summaryExpandedChanged(bool expanded);
     // Emitted at most ~10 Hz per source so the control-panel preview strip
     // does not have to scale every incoming frame.
     void sourceFrameUpdated(const QString &sourceId);
@@ -102,6 +124,10 @@ protected:
     void showEvent(QShowEvent *event) override;
     void hideEvent(QHideEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+
+    // Current HUD scale relative to the 1920x1080 reference layout. Hosts
+    // (e.g. the player client) use it to scale their own overlay chrome.
+    qreal uiScaleFactor() const { return m_uiScale; }
 
 private:
     struct RobotOverlay {
@@ -114,13 +140,18 @@ private:
         QLabel *heat = nullptr;
         QLabel *state = nullptr;
         QLabel *shoot = nullptr;
+        QLabel *diagnostics = nullptr;
+        quint64 robotKey = 0;
         QLabel *redCard = nullptr;
         QLabel *yellowCard = nullptr;
+        QLabel *redCardIcon = nullptr;
+        QLabel *yellowCardIcon = nullptr;
         QLabel *damageNotice = nullptr;
         QGraphicsOpacityEffect *damageOpacity = nullptr;
         QPropertyAnimation *damageAnimation = nullptr;
         QPropertyAnimation *damageDropAnimation = nullptr;
         QVariantAnimation *damageBufferAnimation = nullptr;
+        QWidget *stateLayer = nullptr;   // death dim / hit glow / winner frame
     };
 
     void buildUi();
@@ -135,6 +166,11 @@ private:
                              int previousHp,
                              int currentHp);
     void finishMatch(const QString &settlementType);
+    void resetRound();
+    void revealSummaryIfReady();
+    void layoutSummaryPanel();
+    void updateWinnerHighlight();
+    void flashScore(QLabel *label);
     QString settlementTypeForScores() const;
     void updateTimerDisplay();
     void updateMatchState();
@@ -148,6 +184,9 @@ private:
     void renderSettlementFrame(const QImage &frame);
     void registerLayoutElement(const QString &elementId, QWidget *widget);
     void applyLayoutPositions();
+    void applyUiScale();
+    void setBaseFont(QWidget *widget, double pointSize, bool bold);
+    int tickerBarHeight() const;
     const RobotManager::RobotInfo *robotForTeam(
         quint8 team,
         const QHash<quint64, RobotManager::RobotInfo> &robots) const;
@@ -160,6 +199,7 @@ private:
     QHash<QString, QSize> m_layoutMinimumSizes;
     QHash<QString, QSize> m_layoutMaximumSizes;
     QLabel *m_programView = nullptr;
+    VideoCanvas *m_videoCanvas = nullptr;
     QLabel *m_settlementView = nullptr;
     QLabel *m_matchTitle = nullptr;
     QLabel *m_timerLabel = nullptr;
@@ -170,6 +210,14 @@ private:
     QLabel *m_sourceLabel = nullptr;
     QWidget *m_tickerBar = nullptr;
     TickerMarqueeWidget *m_tickerTextView = nullptr;
+    QWidget *m_titleLayer = nullptr;
+    QWidget *m_timerLayer = nullptr;
+    QLabel *m_tickerTagLabel = nullptr;
+    QWidget *m_hudOverlay = nullptr;
+    QVBoxLayout *m_overlayLayout = nullptr;
+    QHash<QWidget *, double> m_baseFontPoints;
+    qreal m_uiScale = 1.0;
+    bool m_uiScaleReady = false;
     QGraphicsOpacityEffect *m_tickerOpacity = nullptr;
     QPropertyAnimation *m_tickerHeightAnimation = nullptr;
     QPropertyAnimation *m_tickerOpacityAnimation = nullptr;
@@ -196,9 +244,17 @@ private:
     QString m_tickerText;
     bool m_tickerVisible = false;
     bool m_matchRunning = false;
+    bool m_suddenDeath = false;
     bool m_roundEnded = false;
     bool m_settlementFinished = false;
+    bool m_autoFinishOnTimeout = true;
     QString m_settlementType;
+    QString m_refereeNotice;
+    QJsonObject m_matchSummary;
+    MatchSummaryPanel *m_summaryPanel = nullptr;
+    QTimer *m_summaryRevealTimer = nullptr;
+    QVariantAnimation *m_timerPulse = nullptr;
+    QHash<QLabel *, QVariantAnimation *> m_scoreFlashes;
 };
 
 #endif // BROADCASTWINDOW_H

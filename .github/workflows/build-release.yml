@@ -1,60 +1,132 @@
-name: Build Release
+name: Build and Release Windows x64
 
 on:
   push:
-    branches: [ main ]
+    branches: ['**']
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No concurrency group: GitHub groups retain only one pending run, which could
+# discard intermediate pushes. Each commit gets its own isolated release run.
 
 jobs:
   build-windows:
     runs-on: windows-2022
-
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      build_id: ${{ steps.metadata.outputs.build_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install Qt
+      - name: Install Qt x64
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.*'
+          version: '6.8.3'
           arch: win64_msvc2022_64
           modules: 'qtmultimedia'
           cache: true
 
-      - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+      - name: Install Python x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+          cache: pip
+          cache-dependency-path: tools/requirements-release.txt
 
-      - name: Build
-        run: cmake --build build --config Release --parallel
+      - name: Install Windows packager
+        run: python -m pip install -r tools/requirements-release.txt
 
-      - name: Package
-        run: cpack -C Release -G ZIP --verbose
-        working-directory: build
+      - name: Test results web
+        working-directory: results-web
+        run: python -m unittest discover -s tests -v
 
-      - name: Upload artifact
+      - name: Build, test and package three applications
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'MSVC installation was not found.' }
+          if (-not $env:QT_ROOT_DIR) { throw 'Qt installation root was not exported.' }
+          $python = (Get-Command python).Source
+          .\tools\build.ps1 -Configuration Release -Test -SplitPackages -QtDirectory $env:QT_ROOT_DIR -VisualStudioDirectory $vs -PythonExecutable $python
+
+      - name: Read build metadata
+        id: metadata
+        shell: pwsh
+        run: |
+          $release = Get-Content build/latest-split.json -Raw | ConvertFrom-Json
+          $build = Get-Content (Join-Path $release.exportDirectory "Scompetition-Server_$($release.buildId)/build-info.json") -Raw | ConvertFrom-Json
+          "version=$($build.version)" >> $env:GITHUB_OUTPUT
+          "build_id=$($release.buildId)" >> $env:GITHUB_OUTPUT
+          "### Windows x64 packages" >> $env:GITHUB_STEP_SUMMARY
+          $release.packages | ForEach-Object { "- $([IO.Path]::GetFileName($_.path))" >> $env:GITHUB_STEP_SUMMARY }
+
+      - name: Upload three packages and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: WOD-Internal-Match-Server-windows-x64
-          path: build/*.zip
+          name: windows-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/packages/Scompetition-Server_*.zip
+            build/packages/Scompetition-Client_*.zip
+            build/packages/Scompetition-ResultsWeb_*.zip
+            build/packages/SHA256SUMS_*.txt
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/**/Testing/Temporary/*.log
+            build/logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   release:
     needs: build-windows
+    # PRs (including forks) compile/test only; pushes and manual runs publish.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     permissions:
       contents: write
     steps:
-      - name: Download artifact
+      - name: Download this run's packages
         uses: actions/download-artifact@v4
         with:
-          name: WOD-Internal-Match-Server-windows-x64
+          name: windows-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
 
-      - name: Upload to GitHub Release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
-          prerelease: true
-          files: dist/*.zip
+          tag_name: windows-v${{ needs.build-windows.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Windows x64 ${{ needs.build-windows.outputs.build_id }}
+          target_commitish: ${{ github.sha }}
+          prerelease: false
+          make_latest: ${{ github.ref_name == github.event.repository.default_branch && 'true' || 'false' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            Three self-contained Windows 10/11 x64 applications. Extract each complete ZIP before running it.
+
+            - Server: Scompetition.exe, Qt plugins, app-local MSVC runtime, FFmpeg and settlement assets.
+            - Client: ScompetitionClient.exe and its complete desktop runtime/resources.
+            - ResultsWeb: ResultsWeb.exe, bundled Python/SQLite/static artwork and Start.cmd. No Python installation required. Default display http://127.0.0.1:8765/; admin /admin. Save the generated password from the first-run console.
+
+            The current scoring model is 60-second kill-score/SD, not the official BO3 rules. Hardware/site safety acceptance is still required.
+            SHA256SUMS is included. Build/tests and sanitized-PATH package startup checks completed before release.
+          files: |
+            dist/Scompetition-Server_*.zip
+            dist/Scompetition-Client_*.zip
+            dist/Scompetition-ResultsWeb_*.zip
+            dist/SHA256SUMS_*.txt

@@ -29,10 +29,13 @@ enum FrameType : quint8 {
     TypeShootDisabled = 0x07,   // 禁止射击：V1=6B，V2=5B
     TypeLinkDown      = 0x08,   // V2 新增：上游业务链路断开
     TypeLinkUp        = 0x09,   // V2 新增：上游业务链路恢复
+    TypeDeviceAnnounce= 0x0A,   // V2 设备注册：ESP32 Wi-Fi MAC + 手柄 MAC
+    TypeCombatEnd     = 0x0B,   // V2 新增：脱离战斗
+    TypeDeviceHealth  = 0x0C,   // V2 设备健康位图
     // 下行（server -> ESP32）
     TypeGameStart     = 0x81,   // 比赛开始：9B + ACK
     TypeGameEnd       = 0x82,   // 比赛结束：9B + ACK
-    TypeAssignment    = 0x83,   // 分配 ID+MAC：15B + ACK
+    TypeAssignment    = 0x83,   // 分配 ID+双 MAC：21B + ACK
     TypeStatusRequest = 0x84,   // 请求状态：5B，无 ACK
     TypeSetHp         = 0x85,   // 设置 HP：11B + ACK
     TypeYellowCard    = 0x86,   // 黄牌处罚：9B + ACK
@@ -68,13 +71,16 @@ inline int expectedSizeV2(int type)
     case TypeShootEnabled:
     case TypeShootDisabled:
     case TypeLinkDown:
-    case TypeLinkUp:        return 5;
+    case TypeLinkUp:
+    case TypeCombatEnd:     return 5;
+    case TypeDeviceHealth:  return 6;
+    case TypeDeviceAnnounce:return 25;
     case TypeGameStart:
     case TypeGameEnd:
     case TypeYellowCard:
     case TypeForcePowerOff:
     case TypeForcePowerOn:  return 9;
-    case TypeAssignment:    return 15;
+    case TypeAssignment:    return 21;
     case TypeStatusRequest: return 5;
     case TypeSetHp:         return 11;
     case TypeAck:           return 10;
@@ -107,8 +113,12 @@ struct Frame {
     quint32 transactionId  = 0;             // V2 reliable events + ACK
     quint8  ackedFrameType = 0;             // V2 ACK only
     quint8  result         = 0;             // V2 ACK only: 0=ok 1=rejected 2=failed
+    quint8  componentOnline = 0;            // V2 device health bitmap
+    quint32 eventQueueDrops = 0;            // V2 DEVICE_ANNOUNCE diagnostics
+    quint32 udpSendFailures = 0;            // V2 DEVICE_ANNOUNCE diagnostics
     bool    fromStatus     = false;
-    QByteArray controllerMac;               // V2 ASSIGNMENT only, 6 bytes
+    QByteArray deviceMac;                   // V2 DEVICE_ANNOUNCE / ASSIGNMENT, 6 bytes
+    QByteArray controllerMac;               // V2 DEVICE_ANNOUNCE / ASSIGNMENT, 6 bytes
 };
 
 inline quint16 readU16(const char *p)
@@ -236,6 +246,36 @@ inline QByteArray makeReliableEventV2(quint8 type, quint8 robotId, quint32 txid)
     return data;
 }
 
+inline QByteArray makeDeviceAnnounce(quint8 robotId, const QByteArray &deviceMac6,
+                                     const QByteArray &controllerMac6,
+                                     quint32 eventQueueDrops = 0,
+                                     quint32 udpSendFailures = 0)
+{
+    QByteArray data(25, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeDeviceAnnounce);
+    data[4] = static_cast<char>(robotId);
+    for (int i = 0; i < 6; ++i) {
+        data[5 + i] = i < deviceMac6.size() ? deviceMac6[i] : char(0);
+        data[11 + i] = i < controllerMac6.size() ? controllerMac6[i] : char(0);
+    }
+    writeU32(data, 17, eventQueueDrops);
+    writeU32(data, 21, udpSendFailures);
+    return data;
+}
+
+inline QByteArray makeDeviceHealth(quint8 robotId, quint8 componentOnline)
+{
+    QByteArray data(6, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeDeviceHealth);
+    data[4] = static_cast<char>(robotId);
+    data[5] = static_cast<char>(componentOnline);
+    return data;
+}
+
 // ---------- V2 下行构造（服务端用） ----------
 
 inline QByteArray makeDownlinkBase(quint8 type, quint8 targetId, quint32 txid)
@@ -264,17 +304,19 @@ inline QByteArray makeForcePowerOff(quint8 targetId, quint32 txid)
 inline QByteArray makeForcePowerOn(quint8 targetId, quint32 txid)
 { return makeDownlinkBase(TypeForcePowerOn, targetId, txid); }
 
-inline QByteArray makeAssignment(quint8 robotId, const QByteArray &mac6,
-                                  quint32 txid)
+inline QByteArray makeAssignment(quint8 robotId, const QByteArray &deviceMac6,
+                                 const QByteArray &controllerMac6, quint32 txid)
 {
-    QByteArray data(15, Qt::Uninitialized);
+    QByteArray data(21, Qt::Uninitialized);
     writeU16(data, 0, kMagic);
     data[2] = static_cast<char>(kVersion2);
     data[3] = static_cast<char>(TypeAssignment);
     data[4] = static_cast<char>(robotId);
     for (int i = 0; i < 6; ++i)
-        data[5 + i] = i < mac6.size() ? mac6[i] : char(0);
-    writeU32(data, 11, txid);
+        data[5 + i] = i < deviceMac6.size() ? deviceMac6[i] : char(0);
+    for (int i = 0; i < 6; ++i)
+        data[11 + i] = i < controllerMac6.size() ? controllerMac6[i] : char(0);
+    writeU32(data, 17, txid);
     return data;
 }
 
@@ -364,6 +406,15 @@ inline bool parseDatagram(const QByteArray &dg, Frame &out)
     case TypeRevive:
         out.transactionId = readU32(p + 5);
         break;
+    case TypeDeviceHealth:
+        out.componentOnline = static_cast<quint8>(p[5]);
+        break;
+    case TypeDeviceAnnounce:
+        out.deviceMac = QByteArray(p + 5, 6);
+        out.controllerMac = QByteArray(p + 11, 6);
+        out.eventQueueDrops = readU32(p + 17);
+        out.udpSendFailures = readU32(p + 21);
+        break;
     case TypeAck:
         out.ackedFrameType = static_cast<quint8>(p[4]);
         out.robotId        = 0;         // ACK 无 robotId
@@ -371,8 +422,9 @@ inline bool parseDatagram(const QByteArray &dg, Frame &out)
         out.result         = static_cast<quint8>(p[9]);
         break;
     case TypeAssignment:
-        out.controllerMac = QByteArray(p + 5, 6);
-        out.transactionId = readU32(p + 11);
+        out.deviceMac = QByteArray(p + 5, 6);
+        out.controllerMac = QByteArray(p + 11, 6);
+        out.transactionId = readU32(p + 17);
         break;
     case TypeGameStart:
     case TypeGameEnd:
@@ -398,7 +450,8 @@ inline bool isReliableEvent(quint8 type)
 inline bool isDownlinkCommand(quint8 type)
 {
     return type == TypeGameStart || type == TypeGameEnd
-           || type == TypeAssignment || type == TypeSetHp
+           || type == TypeAssignment || type == TypeStatusRequest
+           || type == TypeSetHp
            || type == TypeYellowCard || type == TypeForcePowerOff
            || type == TypeForcePowerOn;
 }

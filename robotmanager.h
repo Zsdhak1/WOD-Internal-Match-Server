@@ -7,6 +7,7 @@
 #include <QHostAddress>
 #include <QObject>
 #include <QSet>
+#include <QString>
 #include <QVector>
 
 class QTimer;
@@ -32,17 +33,37 @@ public:
         bool      shootEnabled = true;
         bool      powerOn = false;     // V2 only: 底盘供电输出
         bool      linkUp = true;       // V2 only: L431 业务链路
+        quint8    componentOnline = 0; // V2 device health bitmap
+        bool      healthReceived = false; // 0 bitmap is not equivalent to no report
+        qint64    lastHealthSeenMs = 0;
+        qint64    firstSeenMs = 0;       // First uplink in this server process
         bool      online = false;
         qint64    lastSeenMs = 0;
-        QHostAddress addr;
-        quint16   port = 0;
+        QString   addressText;         // IP only; never retain QHostAddress here
+        quint16   sourcePort = 0;      // UDP source port from the last uplink
+        quint16   downlinkPort = 0;    // ESP32 command port, normally 5006
         quint32   lastTxid = 0;        // 最近一次可靠事件的 txid
+    };
+
+    struct DeviceInfo {
+        QString deviceMac;
+        QString controllerMac;
+        QString addressText;
+        quint32 ipv4 = 0;
+        quint16 sourcePort = 0;
+        quint8 robotId = 0;
+        quint32 eventQueueDrops = 0;
+        quint32 udpSendFailures = 0;
+        qint64 lastSeenMs = 0;
+        qint64 firstSeenMs = 0;
     };
 
     explicit RobotManager(QObject *parent = nullptr);
 
     void handleDatagram(const QByteArray &data, const QHostAddress &addr, quint16 port);
     QVector<RobotInfo> robots() const;
+    QVector<DeviceInfo> devices() const;
+    bool deviceForMac(const QString &deviceMac, DeviceInfo *device) const;
 
     // V2：服务端维护 robot_id -> team 映射。team=0 表示未分配。
     void   setTeamForRobot(quint8 robotId, quint8 team);
@@ -50,7 +71,7 @@ public:
     const QHash<quint8, quint8> &teamMap() const { return m_robotTeamMap; }
 
     // V2：下行命令需要 ESP32 的 IP:port。返回 false 表示未知。
-    bool endpointForRobot(quint8 robotId, QHostAddress *ip, quint16 *port) const;
+    bool endpointForRobot(quint8 robotId, quint32 *ipv4, quint16 *port) const;
 
     // V2：回 ACK 给 ESP32。由调用方传入 uplink socket。
     void sendAck(QUdpSocket *socket, const QHostAddress &addr, quint16 port,
@@ -75,7 +96,9 @@ signals:
     // V2：收到 ESP32 的 ACK
     void ackReceived(quint8 ackedType, quint32 txid, quint8 result, quint8 robotId);
     // V2：学习到的 ESP32 端点，供下行命令使用
-    void endpointLearned(quint8 robotId, const QHostAddress &ip, quint16 port);
+    void endpointLearned(quint8 robotId, quint32 ipv4, quint16 port);
+    void endpointForgotten(quint8 robotId);
+    void devicesChanged();
 
 private slots:
     void checkOffline();
@@ -90,8 +113,10 @@ private:
     QHash<quint64, int> m_index;             // key -> robots() 中的下标
     QHash<quint8, quint8> m_robotTeamMap;    // V2: robotId -> team
     QHash<quint8, QSet<quint64>> m_processedTxids; // V2: robotId -> set of (type<<32|txid)
-    QHash<quint8, QPair<QHostAddress, quint16>> m_endpoints; // V2: robotId -> last addr
+    QHash<quint8, QPair<quint32, quint16>> m_endpoints; // V2: robotId -> IPv4:downlink port
+    QHash<QString, DeviceInfo> m_devices; // ESP32 Wi-Fi MAC -> latest announce
     QTimer *m_sweep = nullptr;
+    qint64 m_lastInvalidFrameLogMs = 0;
 };
 
 #endif // ROBOTMANAGER_H

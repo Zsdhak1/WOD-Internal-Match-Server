@@ -1,11 +1,15 @@
 #include "mainwindow.h"
 #include "broadcastwindow.h"
+#include "fieldcamera.h"
+#include "checkinpanel.h"
 #include "matchprotocol.h"
 #include "matchserver.h"
 #include "protocol.h"
+#include "responsiveui.h"
 #include "robotcommander.h"
 #include "robotmanager.h"
 
+#include <QCheckBox>
 #include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -35,10 +39,12 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSplitter>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -50,6 +56,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 namespace {
@@ -125,12 +132,73 @@ bool isTeamHeader(const QStringList &fields)
                             || blue.contains(QStringLiteral("蓝色"));
     return redHeader && blueHeader;
 }
+
+bool parseMac6(const QString &text, QByteArray *mac, QString *error)
+{
+    const QString normalized = text.trimmed().replace(QLatin1Char('-'), QLatin1Char(':'));
+    const QStringList parts = normalized.split(QLatin1Char(':'), Qt::SkipEmptyParts);
+    if (parts.size() != 6) {
+        if (error)
+            *error = QObject::tr("MAC 必须为 6 段十六进制，例如 8D:23:AB:A5:3C:C9");
+        return false;
+    }
+
+    QByteArray parsed;
+    parsed.reserve(6);
+    for (const QString &part : parts) {
+        bool ok = false;
+        const uint value = part.toUInt(&ok, 16);
+        if (!ok || value > 0xffU) {
+            if (error)
+                *error = QObject::tr("MAC 段 %1 不是有效十六进制字节").arg(part);
+            return false;
+        }
+        parsed.append(static_cast<char>(value));
+    }
+
+    if (mac)
+        *mac = parsed;
+    return true;
+}
+
+QByteArray macBytes(const QString &text)
+{
+    QByteArray bytes;
+    QString error;
+    return parseMac6(text, &bytes, &error) ? bytes : QByteArray();
+}
+
+QString controlStyleSheet(qreal scale)
+{
+    const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    return QStringLiteral(
+        "QGroupBox { border: %1px solid #43515e; border-radius: %2px; margin-top: %3px; "
+        "padding: %4px %3px %3px; font-weight: 700; color: #dce6eb; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: %4px; padding: 0 %5px; "
+        "color: #72b4ff; }"
+        "QPushButton { min-height: %6px; padding: 0 %7px; }"
+        "QComboBox, QLineEdit, QSpinBox { min-height: %8px; }"
+        "QTableWidget { alternate-background-color: #101a23; gridline-color: #2d3c47; }"
+        "QHeaderView::section { background: #1b2a35; color: #dce6eb; padding: %5px; }"
+        "QFrame#controlHeader { background: #101b24; border: %1px solid #334652; "
+        "border-radius: %2px; }")
+        .arg(px(1))
+        .arg(px(6))
+        .arg(px(10))
+        .arg(px(12))
+        .arg(px(5))
+        .arg(px(30))
+        .arg(px(11))
+        .arg(px(28));
+}
+
 } // namespace
 
-MainWindow::MainWindow(QWidget *parent)
+MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend)
     : QMainWindow(parent)
 {
     m_socket = new QUdpSocket(this);
+    m_socket->setObjectName(QStringLiteral("serverUdpSocket"));
     connect(m_socket, &QUdpSocket::readyRead, this, &MainWindow::onReadyRead);
 
     m_commander = new RobotCommander(m_socket, this);
@@ -138,19 +206,32 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::onLogMessage);
     connect(m_commander, &RobotCommander::commandAcked, this,
             [this](quint32 txid, quint8 type, quint8 result, quint8 robotId) {
-        Q_UNUSED(txid);
+        const auto pending = m_pendingAssignments.find(txid);
+        if (type == proto::TypeAssignment && pending != m_pendingAssignments.end()) {
+            const PendingAssignment assignment = pending.value();
+            m_pendingAssignments.erase(pending);
+            if (result == 0 && m_robots) {
+                m_robots->setTeamForRobot(assignment.robotId, assignment.team);
+                onLogMessage(tr("[设备] 分配确认：%1 → 机器人 %2（%3）")
+                                 .arg(assignment.deviceMac).arg(assignment.robotId)
+                                 .arg(assignment.team == 1 ? tr("红方")
+                                      : assignment.team == 2 ? tr("蓝方") : tr("未分配")));
+                refreshTable();
+            }
+        }
         if (result != 0)
             onLogMessage(QStringLiteral("[警告] 机器人%1 执行 0x%2 失败 result=%3")
                              .arg(robotId).arg(type, 2, 16).arg(result));
     });
     connect(m_commander, &RobotCommander::commandTimeout, this,
             [this](quint32 txid, quint8 type, quint8 robotId) {
-        Q_UNUSED(txid);
+        m_pendingAssignments.remove(txid);
         onLogMessage(QStringLiteral("[超时] 机器人%1 命令 0x%2 未获 ACK")
                          .arg(robotId).arg(type, 2, 16));
     });
 
     m_robots = new RobotManager(this);
+    connect(m_robots, &RobotManager::endpointForgotten, m_commander, &RobotCommander::forgetEndpoint);
     connect(m_robots, &RobotManager::robotsChanged, this, &MainWindow::refreshTable);
     connect(m_robots, &RobotManager::logMessage, this, &MainWindow::onLogMessage);
     connect(m_robots, &RobotManager::reliableEventNeedsAck, this,
@@ -183,7 +264,28 @@ MainWindow::MainWindow(QWidget *parent)
         }
     });
 
+    connect(m_robots, &RobotManager::combatEvent, this,
+            [this](quint8 team, quint8 robotId, quint8 type) {
+        m_referee.recordCombatEvent(team, robotId, type, refereeNow());
+        if (type == proto::TypeDeath)
+            onRefereeTick();
+    });
+
+    m_refereeClock.start();
+    m_refereeTimer = new QTimer(this);
+    m_refereeTimer->setInterval(100);
+    connect(m_refereeTimer, &QTimer::timeout, this, &MainWindow::onRefereeTick);
+    m_refereeTimer->start();
+
     m_broadcast = new BroadcastWindow;
+    // MatchReferee decides the result at 00:00 instead of the manual score.
+    m_broadcast->setAutoFinishOnTimeout(false);
+    connect(m_broadcast, &BroadcastWindow::timeExpired, this, &MainWindow::onTimeExpired);
+    connect(m_broadcast, &BroadcastWindow::summaryExpandedChanged, this, [this](bool expanded) {
+        if (m_summaryToggleBtn)
+            m_summaryToggleBtn->setText(expanded ? tr("收起赛后数据") : tr("展开赛后数据"));
+        publishMatchState();
+    });
     m_matchServer = new MatchServer(this);
     connect(m_matchServer, &MatchServer::logMessage, this, &MainWindow::onLogMessage);
     connect(m_matchServer, &MatchServer::videoSourcesChanged, this,
@@ -209,8 +311,34 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_broadcast, &BroadcastWindow::presentationStateChanged,
             this, &MainWindow::publishMatchState);
 
+    m_fieldCamera = cameraBackend ? new FieldCamera(cameraBackend, this) : new FieldCamera(this);
+    m_fieldCamera->setObjectName(QStringLiteral("fieldCameraController"));
+    connect(m_fieldCamera, &FieldCamera::frameReady, this, [this](const QImage &frame) {
+        if (m_broadcast) m_broadcast->setProgramFrame(frame);
+        if (frame.isNull()) onSourceFrameUpdated(QStringLiteral("field"));
+    });
+    connect(m_fieldCamera, &FieldCamera::devicesChanged, this, &MainWindow::refreshFieldCameraDevices);
+    connect(m_fieldCamera, &FieldCamera::stateChanged, this, &MainWindow::onFieldCameraStateChanged);
+    connect(m_fieldCamera, &FieldCamera::logMessage, this, &MainWindow::onLogMessage);
     buildUi();
+    m_checkinPanel = new CheckinPanel(this);
+    m_checkinPanel->setWindowFlag(Qt::Window, true);
+    m_checkinPanel->resize(1400, 850);
+    m_checkinPanel->hide();
+    const auto refreshCheckin = [this] {
+        m_checkinPanel->updateSnapshot(m_robots->robots(), m_robots->devices());
+    };
+    connect(m_robots, &RobotManager::robotsChanged, this, refreshCheckin);
+    connect(m_robots, &RobotManager::devicesChanged, this, refreshCheckin);
+    QSettings cameraSettings(QSettings::defaultFormat(), QSettings::UserScope,
+                             QStringLiteral("Scompetition"), QStringLiteral("FieldCamera"));
+    m_fieldCamera->selectDevice(cameraSettings.value(QStringLiteral("deviceId")).toByteArray());
+    refreshFieldCameraDevices();
+    onFieldCameraStateChanged();
+    loadRefereeRules();
     populateScreens();
+    connect(m_robots, &RobotManager::devicesChanged, this,
+            &MainWindow::refreshDeviceList);
     connect(m_broadcast, &BroadcastWindow::visibilityChanged, this, [this](bool visible) {
         if (m_broadcastBtn)
             m_broadcastBtn->setText(visible ? tr("隐藏转播画面") : tr("显示转播画面"));
@@ -234,6 +362,15 @@ MainWindow::MainWindow(QWidget *parent)
         publishMatchState();
         updateProgramSourceList();
         refreshTable();
+        refreshDeviceList();
+        // The native window has a real splitter size only after the first
+        // event-loop turn. Re-run the responsive pass so vertical layouts on
+        // compact displays receive their intended proportions.
+        applyResponsiveUi();
+        // Test hook: SCOMP_AUTO_BROADCAST=1 opens the broadcast output right
+        // after startup so resolution scaling can be verified unattended.
+        if (qEnvironmentVariableIsSet("SCOMP_AUTO_BROADCAST"))
+            onShowBroadcast();
     });
 
     for (int sourceNumber = 1; sourceNumber <= 5; ++sourceNumber) {
@@ -249,6 +386,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_fieldCamera) m_fieldCamera->stop();
     if (m_autoSwitchTimer)
         m_autoSwitchTimer->stop();
     if (m_matchServer)
@@ -261,6 +399,8 @@ MainWindow::~MainWindow()
         delete m_broadcast;
         m_broadcast = nullptr;
     }
+    delete m_uiScaler;
+    m_uiScaler = nullptr;
 }
 
 void MainWindow::buildUi()
@@ -268,16 +408,7 @@ void MainWindow::buildUi()
     setWindowTitle(tr("赛事转播控制台"));
 
     auto *central = new QWidget(this);
-    setMinimumSize(1080, 700);
-    central->setStyleSheet(QStringLiteral(
-        "QGroupBox { border: 1px solid #43515e; border-radius: 6px; margin-top: 10px; "
-        "padding: 12px 10px 10px; font-weight: 700; color: #dce6eb; }"
-        "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 5px; "
-        "color: #72b4ff; }"
-        "QPushButton { min-height: 30px; padding: 0 11px; }"
-        "QComboBox, QLineEdit, QSpinBox { min-height: 28px; }"
-        "QTableWidget { alternate-background-color: #101a23; gridline-color: #2d3c47; }"
-        "QHeaderView::section { background: #1b2a35; color: #dce6eb; padding: 5px; }"));
+    central->setStyleSheet(controlStyleSheet(1.0));
 
     auto *root = new QVBoxLayout(central);
     root->setContentsMargins(14, 12, 14, 12);
@@ -285,9 +416,6 @@ void MainWindow::buildUi()
 
     auto *header = new QFrame(central);
     header->setObjectName(QStringLiteral("controlHeader"));
-    header->setStyleSheet(QStringLiteral(
-        "QFrame#controlHeader { background: #101b24; border: 1px solid #334652; "
-        "border-radius: 6px; }"));
     auto *headerLayout = new QHBoxLayout(header);
     headerLayout->setContentsMargins(14, 9, 14, 9);
     auto *title = new QLabel(tr("赛事转播控制台"), header);
@@ -303,10 +431,10 @@ void MainWindow::buildUi()
     headerLayout->addWidget(m_connLabel, 1);
     root->addWidget(header);
 
-    auto *workspace = new QSplitter(Qt::Horizontal, central);
-    workspace->setChildrenCollapsible(false);
+    m_workspace = new QSplitter(Qt::Horizontal, central);
+    m_workspace->setChildrenCollapsible(false);
 
-    auto *controlScroll = new QScrollArea(workspace);
+    auto *controlScroll = new QScrollArea(m_workspace);
     controlScroll->setWidgetResizable(true);
     controlScroll->setFrameShape(QFrame::NoFrame);
     controlScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -323,6 +451,7 @@ void MainWindow::buildUi()
 
     auto *matchGroup = createGroup(tr("比赛与转播"));
     auto *matchLayout = new QFormLayout(matchGroup);
+    matchLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
     matchLayout->setContentsMargins(8, 10, 8, 6);
     matchLayout->setHorizontalSpacing(12);
     matchLayout->setVerticalSpacing(8);
@@ -351,14 +480,92 @@ void MainWindow::buildUi()
     m_settlementPreviewTypeEdit = new QComboBox(matchGroup);
     m_settlementPreviewTypeEdit->addItem(tr("红方胜利"), QStringLiteral("redwin"));
     m_settlementPreviewTypeEdit->addItem(tr("蓝方胜利"), QStringLiteral("bluewin"));
+    m_settlementPreviewTypeEdit->addItem(tr("平局"), QStringLiteral("draw"));
+    m_settlementPreviewTypeEdit->addItem(tr("终止"), QStringLiteral("termination"));
     animationActions->addWidget(m_settlementPreviewTypeEdit);
-    m_testVictoryAnimationBtn = new QPushButton(tr("测试胜利动画"), matchGroup);
+    m_testVictoryAnimationBtn = new QPushButton(tr("预览结算动画"), matchGroup);
     connect(m_testVictoryAnimationBtn, &QPushButton::clicked,
             this, &MainWindow::onTestVictoryAnimation);
     animationActions->addWidget(m_testVictoryAnimationBtn);
     animationActions->addStretch(1);
     matchLayout->addRow(tr("动画预览"), animationActions);
+    auto *checkinButton = new QPushButton(tr("打开车辆检录（只读）"), matchGroup);
+    checkinButton->setObjectName(QStringLiteral("openCheckin"));
+    connect(checkinButton, &QPushButton::clicked, this, [this] {
+        m_checkinPanel->updateSnapshot(m_robots->robots(), m_robots->devices());
+        m_checkinPanel->setInspectionEnabled(true);
+        m_checkinPanel->show();
+        m_checkinPanel->raise();
+    });
+    matchLayout->addRow(tr("赛前检查"), checkinButton);
     controlLayout->addWidget(matchGroup);
+
+    auto *refereeGroup = createGroup(tr("胜负判定"));
+    refereeGroup->setObjectName(QStringLiteral("refereeGroup"));
+    auto *refereeLayout = new QVBoxLayout(refereeGroup);
+    refereeLayout->setContentsMargins(8, 10, 8, 6);
+    refereeLayout->setSpacing(8);
+    m_refereeStatusLabel = new QLabel(refereeGroup);
+    m_refereeStatusLabel->setObjectName(QStringLiteral("refereeStatus"));
+    m_refereeStatusLabel->setWordWrap(true);
+    m_refereeStatusLabel->setTextFormat(Qt::RichText);
+    m_refereeStatusLabel->setMinimumHeight(40);
+    m_refereeStatusLabel->setStyleSheet(QStringLiteral(
+        "QLabel#refereeStatus { background: #f3f6f8; color: #1d2a33; border: 1px solid #c9d3da;"
+        " border-radius: 5px; padding: 6px 9px; }"));
+    refereeLayout->addWidget(m_refereeStatusLabel);
+
+    auto *ruleGrid = new QGridLayout;
+    ruleGrid->setHorizontalSpacing(12);
+    ruleGrid->setVerticalSpacing(6);
+    m_redCardDisqualifiesEdit = new QCheckBox(tr("红牌直接判负"), refereeGroup);
+    m_redCardDisqualifiesEdit->setObjectName(QStringLiteral("ruleRedCard"));
+    m_offlineGraceEdit = new QSpinBox(refereeGroup);
+    m_offlineGraceEdit->setObjectName(QStringLiteral("ruleOfflineGrace"));
+    m_offlineGraceEdit->setRange(0, 120);
+    m_offlineGraceEdit->setSuffix(tr(" 秒"));
+    m_offlineGraceEdit->setSpecialValueText(tr("不判负"));
+    m_offlineGraceEdit->setToolTip(tr("比赛进行中一方连续离线超过该时长、且另一方在线时判负；暂停时不计时。"));
+    ruleGrid->addWidget(new QLabel(tr("击杀 +1 · 同分加时"), refereeGroup), 0, 0);
+    ruleGrid->addWidget(m_redCardDisqualifiesEdit, 0, 1);
+    auto *graceRow = new QHBoxLayout;
+    graceRow->addWidget(new QLabel(tr("离线判负"), refereeGroup));
+    graceRow->addWidget(m_offlineGraceEdit, 1);
+    ruleGrid->addLayout(graceRow, 1, 1);
+    ruleGrid->setColumnStretch(0, 1);
+    ruleGrid->setColumnStretch(1, 1);
+    refereeLayout->addLayout(ruleGrid);
+    connect(m_redCardDisqualifiesEdit, &QCheckBox::toggled, this, &MainWindow::onRefereeRulesChanged);
+    connect(m_offlineGraceEdit, qOverload<int>(&QSpinBox::valueChanged),
+            this, &MainWindow::onRefereeRulesChanged);
+
+    auto *verdictActions = new QHBoxLayout;
+    verdictActions->setSpacing(6);
+    m_declareRedBtn = new QPushButton(tr("判红方胜"), refereeGroup);
+    m_declareRedBtn->setObjectName(QStringLiteral("declareRedWin"));
+    m_declareRedBtn->setStyleSheet(QStringLiteral("color: #ff6872; font-weight: 700;"));
+    m_declareBlueBtn = new QPushButton(tr("判蓝方胜"), refereeGroup);
+    m_declareBlueBtn->setObjectName(QStringLiteral("declareBlueWin"));
+    m_declareBlueBtn->setStyleSheet(QStringLiteral("color: #72b4ff; font-weight: 700;"));
+    m_summaryToggleBtn = new QPushButton(tr("展开赛后数据"), refereeGroup);
+    m_summaryToggleBtn->setObjectName(QStringLiteral("summaryToggle"));
+    m_summaryToggleBtn->setEnabled(false);
+    connect(m_declareRedBtn, &QPushButton::clicked, this, &MainWindow::onDeclareRedWin);
+    connect(m_declareBlueBtn, &QPushButton::clicked, this, &MainWindow::onDeclareBlueWin);
+    connect(m_summaryToggleBtn, &QPushButton::clicked, this, &MainWindow::onToggleSummary);
+    verdictActions->addWidget(m_declareRedBtn, 1);
+    verdictActions->addWidget(m_declareBlueBtn, 1);
+    verdictActions->addWidget(m_summaryToggleBtn, 1);
+    refereeLayout->addLayout(verdictActions);
+    auto *refereeHint = new QLabel(
+        tr("本局击杀对方 +1 分，常规时间内可复活。时间到积分高者胜；"
+           "同分进入 SUDDEN DEATH，下一次单方击杀定胜负。同时击杀各 +1，继续加时。"
+           "裁判判定、红黄牌及离线判负仍优先。"),
+        refereeGroup);
+    refereeHint->setWordWrap(true);
+    refereeHint->setStyleSheet(QStringLiteral("color: #65717c;"));
+    refereeLayout->addWidget(refereeHint);
+    controlLayout->addWidget(refereeGroup);
 
     auto *teamGroup = createGroup(tr("队伍、比分与牌面"));
     auto *teamLayout = new QVBoxLayout(teamGroup);
@@ -407,18 +614,18 @@ void MainWindow::buildUi()
     auto *scoreRow = new QGridLayout;
     scoreRow->setHorizontalSpacing(8);
     scoreRow->setVerticalSpacing(6);
-    auto *redScoreLabel = new QLabel(tr("红方小局积分"), teamGroup);
+    auto *redScoreLabel = new QLabel(tr("红方击杀积分"), teamGroup);
     redScoreLabel->setStyleSheet(QStringLiteral("color: #ff6872;"));
-    auto *blueScoreLabel = new QLabel(tr("蓝方小局积分"), teamGroup);
+    auto *blueScoreLabel = new QLabel(tr("蓝方击杀积分"), teamGroup);
     blueScoreLabel->setStyleSheet(QStringLiteral("color: #72b4ff;"));
     scoreRow->addWidget(redScoreLabel, 0, 0);
     m_redScoreEdit = new QSpinBox(teamGroup);
-    m_redScoreEdit->setRange(0, 99);
+    m_redScoreEdit->setRange(0, 9999);
     m_redScoreEdit->setValue(0);
     scoreRow->addWidget(m_redScoreEdit, 0, 1);
     scoreRow->addWidget(blueScoreLabel, 0, 2);
     m_blueScoreEdit = new QSpinBox(teamGroup);
-    m_blueScoreEdit->setRange(0, 99);
+    m_blueScoreEdit->setRange(0, 9999);
     m_blueScoreEdit->setValue(0);
     scoreRow->addWidget(m_blueScoreEdit, 0, 3);
     connect(m_redScoreEdit, qOverload<int>(&QSpinBox::valueChanged),
@@ -441,6 +648,7 @@ void MainWindow::buildUi()
 
     auto *programGroup = createGroup(tr("节目输出与字幕"));
     auto *programLayout = new QFormLayout(programGroup);
+    programLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
     programLayout->setContentsMargins(8, 10, 8, 6);
     programLayout->setHorizontalSpacing(12);
     programLayout->setVerticalSpacing(8);
@@ -450,6 +658,7 @@ void MainWindow::buildUi()
     connect(m_programModeEdit, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::onProgramModeChanged);
     m_programSourceEdit = new QComboBox(programGroup);
+    m_programSourceEdit->setObjectName(QStringLiteral("programSource"));
     m_programSourceEdit->setMinimumWidth(220);
     connect(m_programSourceEdit, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::onProgramSourceChanged);
@@ -504,6 +713,44 @@ void MainWindow::buildUi()
     programLayout->addRow(tickerLabel, tickerBlock);
     controlLayout->addWidget(programGroup);
 
+    auto *cameraGroup = createGroup(tr("本地全场摄像头（USB / 内置）"));
+    cameraGroup->setObjectName(QStringLiteral("fieldCameraGroup"));
+    auto *cameraLayout = new QFormLayout(cameraGroup);
+    cameraLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    cameraLayout->setContentsMargins(8, 10, 8, 6);
+    m_fieldCameraEdit = new QComboBox(cameraGroup);
+    m_fieldCameraEdit->setObjectName(QStringLiteral("fieldCameraDevice"));
+    m_fieldCameraEdit->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_fieldCameraEdit->setMinimumContentsLength(12);
+    connect(m_fieldCameraEdit, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            &MainWindow::onFieldCameraSelected);
+    cameraLayout->addRow(tr("摄像头设备"), m_fieldCameraEdit);
+    auto *cameraActions = new QHBoxLayout;
+    auto *refreshCamera = new QPushButton(tr("刷新设备"), cameraGroup);
+    refreshCamera->setObjectName(QStringLiteral("fieldCameraRefresh"));
+    connect(refreshCamera, &QPushButton::clicked, this, &MainWindow::refreshFieldCameraDevices);
+    m_fieldCameraToggle = new QPushButton(tr("启动采集"), cameraGroup);
+    m_fieldCameraToggle->setObjectName(QStringLiteral("fieldCameraToggle"));
+    connect(m_fieldCameraToggle, &QPushButton::clicked, this, &MainWindow::onToggleFieldCamera);
+    auto *takeCamera = new QPushButton(tr("切到全场"), cameraGroup);
+    takeCamera->setObjectName(QStringLiteral("fieldCameraTake"));
+    connect(takeCamera, &QPushButton::clicked, this, [this] {
+        m_programSourceEdit->setCurrentIndex(m_programSourceEdit->findData(QStringLiteral("field")));
+    });
+    cameraActions->addWidget(refreshCamera);
+    cameraActions->addWidget(m_fieldCameraToggle);
+    cameraActions->addWidget(takeCamera);
+    cameraLayout->addRow(QString(), cameraActions);
+    m_fieldCameraStatus = new QLabel(cameraGroup);
+    m_fieldCameraStatus->setObjectName(QStringLiteral("fieldCameraStatus"));
+    m_fieldCameraStatus->setWordWrap(true);
+    cameraLayout->addRow(QString(), m_fieldCameraStatus);
+    auto *cameraHint = new QLabel(tr("独立全场机位，不占红蓝选手身份；启动后可点击下方全场缩略图导播。"
+                                     "默认不采集，断开后仅重连同一设备。"), cameraGroup);
+    cameraHint->setWordWrap(true);
+    cameraLayout->addRow(QString(), cameraHint);
+    controlLayout->addWidget(cameraGroup);
+
     // Per-source live preview strip. Each registered client shows up here as
     // a clickable thumbnail so the operator can see every feed at a glance.
     m_sourcePreviewGroup = createGroup(tr("已接入视频源预览"));
@@ -528,6 +775,7 @@ void MainWindow::buildUi()
 
     auto *layoutGroup = createGroup(tr("HUD 布局"));
     auto *layoutForm = new QFormLayout(layoutGroup);
+    layoutForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
     layoutForm->setContentsMargins(8, 10, 8, 6);
     layoutForm->setHorizontalSpacing(12);
     layoutForm->setVerticalSpacing(8);
@@ -535,10 +783,9 @@ void MainWindow::buildUi()
     m_layoutElementEdit->setMinimumWidth(180);
     const QList<QPair<QString, QString>> layoutElements = {
         {tr("红方信息面板"), QStringLiteral("red_team_panel")},
-        {tr("中央计时 HUD"), QStringLiteral("center_hud")},
+        {tr("中央整体计时 / 比分 HUD"), QStringLiteral("center_hud")},
         {tr("蓝方信息面板"), QStringLiteral("blue_team_panel")},
-        {tr("左侧比分背景板"), QStringLiteral("left_score_panel")},
-        {tr("右侧比分背景板"), QStringLiteral("right_score_panel")},
+
         {tr("比赛标题"), QStringLiteral("match_title")},
         {tr("比赛计时"), QStringLiteral("match_timer")},
         {tr("左侧小局比分"), QStringLiteral("red_round_score")},
@@ -554,14 +801,14 @@ void MainWindow::buildUi()
     auto *positionRow = new QHBoxLayout;
     m_layoutXEdit = new QSpinBox(layoutGroup);
     m_layoutXEdit->setRange(-2000, 2000);
-    m_layoutXEdit->setSuffix(tr(" px"));
+    m_layoutXEdit->setSuffix(tr(" 基准 px"));
     connect(m_layoutXEdit, qOverload<int>(&QSpinBox::valueChanged),
             this, &MainWindow::onLayoutPositionChanged);
     positionRow->addWidget(new QLabel(tr("X"), layoutGroup));
     positionRow->addWidget(m_layoutXEdit, 1);
     m_layoutYEdit = new QSpinBox(layoutGroup);
     m_layoutYEdit->setRange(-2000, 2000);
-    m_layoutYEdit->setSuffix(tr(" px"));
+    m_layoutYEdit->setSuffix(tr(" 基准 px"));
     connect(m_layoutYEdit, qOverload<int>(&QSpinBox::valueChanged),
             this, &MainWindow::onLayoutPositionChanged);
     positionRow->addWidget(new QLabel(tr("Y"), layoutGroup));
@@ -570,14 +817,14 @@ void MainWindow::buildUi()
     auto *sizeRow = new QHBoxLayout;
     m_layoutWidthEdit = new QSpinBox(layoutGroup);
     m_layoutWidthEdit->setRange(1, 4000);
-    m_layoutWidthEdit->setSuffix(tr(" px"));
+    m_layoutWidthEdit->setSuffix(tr(" 基准 px"));
     connect(m_layoutWidthEdit, qOverload<int>(&QSpinBox::valueChanged),
             this, &MainWindow::onLayoutSizeChanged);
     sizeRow->addWidget(new QLabel(tr("宽"), layoutGroup));
     sizeRow->addWidget(m_layoutWidthEdit, 1);
     m_layoutHeightEdit = new QSpinBox(layoutGroup);
     m_layoutHeightEdit->setRange(1, 4000);
-    m_layoutHeightEdit->setSuffix(tr(" px"));
+    m_layoutHeightEdit->setSuffix(tr(" 基准 px"));
     connect(m_layoutHeightEdit, qOverload<int>(&QSpinBox::valueChanged),
             this, &MainWindow::onLayoutSizeChanged);
     sizeRow->addWidget(new QLabel(tr("高"), layoutGroup));
@@ -594,7 +841,10 @@ void MainWindow::buildUi()
     layoutActions->addWidget(m_saveLayoutBtn);
     layoutActions->addWidget(m_loadLayoutBtn);
     layoutForm->addRow(QString(), layoutActions);
-    auto *layoutHint = new QLabel(tr("正值向右/下；宽高为组件实际像素尺寸；布局文件保存在程序目录"), layoutGroup);
+    auto *layoutHint = new QLabel(
+        tr("位置和尺寸使用 1920×1080 基准像素；输出到其他分辨率时会按比例换算；"
+           "中央底板为整体素材，比分文字仍可调整；边栏默认贴合中央宽度；布局文件保存在程序目录"),
+        layoutGroup);
     layoutHint->setStyleSheet(QStringLiteral("color: #65717c;"));
     layoutHint->setWordWrap(true);
     layoutForm->addRow(QString(), layoutHint);
@@ -603,11 +853,13 @@ void MainWindow::buildUi()
 
     auto *networkGroup = createGroup(tr("网络服务"));
     auto *networkLayout = new QFormLayout(networkGroup);
+    networkLayout->setRowWrapPolicy(QFormLayout::WrapLongRows);
     networkLayout->setContentsMargins(8, 10, 8, 6);
     networkLayout->setHorizontalSpacing(12);
     networkLayout->setVerticalSpacing(8);
     auto *udpRow = new QHBoxLayout;
     m_portEdit = new QSpinBox(networkGroup);
+    m_portEdit->setObjectName(QStringLiteral("serverUdpPort"));
     m_portEdit->setRange(1, 65535);
     m_portEdit->setValue(proto::kUplinkPort);
     m_listenBtn = new QPushButton(tr("启动监听"), networkGroup);
@@ -632,23 +884,31 @@ void MainWindow::buildUi()
     controlLayout->addStretch(1);
     controlScroll->setWidget(controlPage);
 
-    auto *statusSplitter = new QSplitter(Qt::Vertical, workspace);
-    statusSplitter->setChildrenCollapsible(false);
+    m_statusSplitter = new QSplitter(Qt::Vertical, m_workspace);
+    m_statusSplitter->setChildrenCollapsible(false);
 
     // 设备管理面板：V2 中 team 不再来自数据包，需服务器侧分配
-    auto *deviceGroup = new QGroupBox(tr("设备管理"), statusSplitter);
+    auto *deviceGroup = new QGroupBox(tr("设备管理"), m_statusSplitter);
     auto *deviceLayout = new QVBoxLayout(deviceGroup);
     deviceLayout->setContentsMargins(8, 10, 8, 8);
-    auto *deviceRow = new QHBoxLayout;
+    auto *deviceGrid = new QGridLayout;
+    auto *deviceSelectLabel = new QLabel(tr("ESP32 设备:"), deviceGroup);
+    m_deviceSelectEdit = new QComboBox(deviceGroup);
+    m_deviceSelectEdit->setObjectName(QStringLiteral("deviceSelect"));
+    m_deviceSelectEdit->setMinimumWidth(200);
+    m_deviceSelectEdit->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_deviceSelectEdit->setMinimumContentsLength(16);
     auto *deviceRobotLabel = new QLabel(tr("机器人 ID:"), deviceGroup);
     m_deviceRobotEdit = new QSpinBox(deviceGroup);
+    m_deviceRobotEdit->setObjectName(QStringLiteral("deviceRobotId"));
     m_deviceRobotEdit->setRange(1, 255);
     auto *deviceTeamLabel = new QLabel(tr("分配到:"), deviceGroup);
     m_deviceTeamEdit = new QComboBox(deviceGroup);
+    m_deviceTeamEdit->setObjectName(QStringLiteral("deviceTeam"));
     m_deviceTeamEdit->addItem(tr("未分配"), 0);
     m_deviceTeamEdit->addItem(tr("红方"), 1);
     m_deviceTeamEdit->addItem(tr("蓝方"), 2);
-    auto *deviceAssignBtn = new QPushButton(tr("分配队伍"), deviceGroup);
+    auto *deviceAssignBtn = new QPushButton(tr("分配 ID + 手柄"), deviceGroup);
     connect(deviceAssignBtn, &QPushButton::clicked, this,
             &MainWindow::onAssignTeam);
     auto *devicePowerOnBtn = new QPushButton(tr("通电"), deviceGroup);
@@ -667,29 +927,65 @@ void MainWindow::buildUi()
     auto *deviceStatusBtn = new QPushButton(tr("请求状态"), deviceGroup);
     connect(deviceStatusBtn, &QPushButton::clicked, this,
             &MainWindow::onRequestStatus);
-    deviceRow->addWidget(deviceRobotLabel);
-    deviceRow->addWidget(m_deviceRobotEdit);
-    deviceRow->addWidget(deviceTeamLabel);
-    deviceRow->addWidget(m_deviceTeamEdit);
-    deviceRow->addWidget(deviceAssignBtn);
-    deviceRow->addStretch(1);
-    deviceRow->addWidget(deviceHpBtn);
-    deviceRow->addWidget(deviceHpEdit);
-    deviceRow->addWidget(deviceStatusBtn);
-    deviceRow->addWidget(devicePowerOnBtn);
-    deviceRow->addWidget(devicePowerOffBtn);
-    deviceLayout->addLayout(deviceRow);
-    auto *deviceHint = new QLabel(
-        tr("V2 设备需先通过上行状态帧学习 IP，再分配队伍和手柄 MAC"),
-        deviceGroup);
-    deviceHint->setStyleSheet(QStringLiteral("color: #6c7886; font-size: 11px;"));
-    deviceLayout->addWidget(deviceHint);
-    statusSplitter->addWidget(deviceGroup);
+    deviceGrid->addWidget(deviceSelectLabel, 0, 0);
+    deviceGrid->addWidget(m_deviceSelectEdit, 0, 1, 1, 7);
+    deviceGrid->addWidget(deviceRobotLabel, 1, 0);
+    deviceGrid->addWidget(m_deviceRobotEdit, 1, 1);
+    deviceGrid->addWidget(deviceTeamLabel, 1, 2);
+    deviceGrid->addWidget(m_deviceTeamEdit, 1, 3);
+    deviceGrid->addWidget(deviceAssignBtn, 1, 4, 1, 4);
 
-    auto *tableGroup = new QGroupBox(tr("机器人状态"), statusSplitter);
+    deviceGrid->addWidget(new QLabel(tr("手柄 BLE MAC:"), deviceGroup), 2, 0);
+    m_deviceControllerMacEdit = new QLineEdit(deviceGroup);
+    m_deviceControllerMacEdit->setObjectName(QStringLiteral("deviceControllerMac"));
+    m_deviceControllerMacEdit->setPlaceholderText(
+        tr("必填，例如 8D:23:AB:A5:3C:C9"));
+    m_deviceControllerMacEdit->setMinimumWidth(160);
+    deviceGrid->addWidget(m_deviceControllerMacEdit, 2, 1, 1, 7);
+    deviceGrid->addWidget(deviceHpBtn, 3, 0);
+    deviceGrid->addWidget(deviceHpEdit, 3, 1);
+    deviceGrid->addWidget(deviceStatusBtn, 3, 2, 1, 2);
+    deviceGrid->addWidget(devicePowerOnBtn, 3, 4, 1, 2);
+    deviceGrid->addWidget(devicePowerOffBtn, 3, 6, 1, 2);
+    deviceGrid->setColumnStretch(1, 1);
+    deviceGrid->setColumnStretch(3, 1);
+    deviceGrid->setColumnStretch(7, 1);
+    deviceLayout->addLayout(deviceGrid);
+
+    connect(m_deviceSelectEdit, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+        if (!m_robots || !m_deviceSelectEdit || !m_deviceControllerMacEdit
+            || !m_deviceRobotEdit) {
+            return;
+        }
+        RobotManager::DeviceInfo device;
+        if (!m_robots->deviceForMac(m_deviceSelectEdit->currentData().toString(),
+                                    &device)) {
+            return;
+        }
+        m_deviceControllerMacEdit->setText(device.controllerMac);
+        m_deviceControllerMacEdit->setProperty("reportedMac", device.controllerMac);
+        m_deviceRobotEdit->setProperty("reportedId", device.robotId);
+        if (device.robotId != 0)
+            m_deviceRobotEdit->setValue(device.robotId);
+    });
+    auto *deviceHint = new QLabel(
+        tr("等待 ESP32 DEVICE_ANNOUNCE 后选择设备，填写手柄 BLE MAC；"
+           "服务器按 21 字节 ASSIGNMENT 分配 ID，并通过 UDP 5006 下发。"),
+        deviceGroup);
+    deviceHint->setStyleSheet(QStringLiteral("color: #6c7886;"));
+    QFont deviceHintFont = deviceHint->font();
+    deviceHintFont.setPointSize(11);
+    deviceHint->setFont(deviceHintFont);
+    deviceHint->setWordWrap(true);
+    deviceLayout->addWidget(deviceHint);
+    m_statusSplitter->addWidget(deviceGroup);
+
+    auto *tableGroup = new QGroupBox(tr("机器人状态"), m_statusSplitter);
     auto *tableLayout = new QVBoxLayout(tableGroup);
     tableLayout->setContentsMargins(8, 10, 8, 8);
     m_table = new QTableWidget(0, 11, tableGroup);
+    m_table->setObjectName(QStringLiteral("robotTable"));
     m_table->setHorizontalHeaderLabels({
         tr("机器人ID"), tr("队伍"), tr("血量 HP"), tr("热量"),
         tr("功率 W"), tr("状态"), tr("射击"), tr("供电"), tr("链路"),
@@ -707,7 +1003,7 @@ void MainWindow::buildUi()
     tableLayout->addWidget(m_table);
 
     auto *logRow = new QHBoxLayout;
-    auto *logGroup = new QGroupBox(tr("事件日志"), statusSplitter);
+    auto *logGroup = new QGroupBox(tr("事件日志"), m_statusSplitter);
     auto *logLayout = new QVBoxLayout(logGroup);
     logLayout->setContentsMargins(8, 10, 8, 8);
     auto *logTitle = new QLabel(tr("登记、死亡、复活、受击、攻击、禁射和离线事件"), logGroup);
@@ -724,23 +1020,37 @@ void MainWindow::buildUi()
     logLayout->addLayout(logRow);
 
     m_log = new QPlainTextEdit(logGroup);
+    m_log->setObjectName(QStringLiteral("serverLog"));
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(2000);
     logLayout->addWidget(m_log);
 
-    workspace->addWidget(controlScroll);
-    workspace->addWidget(statusSplitter);
-    statusSplitter->addWidget(tableGroup);
-    statusSplitter->addWidget(logGroup);
-    workspace->setStretchFactor(0, 0);
-    workspace->setStretchFactor(1, 1);
-    workspace->setSizes({380, 900});
-    statusSplitter->setStretchFactor(0, 3);
-    statusSplitter->setStretchFactor(1, 2);
-    root->addWidget(workspace, 1);
+    m_workspace->addWidget(controlScroll);
+    m_workspace->addWidget(m_statusSplitter);
+    m_statusSplitter->addWidget(tableGroup);
+    m_statusSplitter->addWidget(logGroup);
+    m_workspace->setStretchFactor(0, 1);
+    m_workspace->setStretchFactor(1, 2);
+    m_workspace->setSizes({380, 900});
+    m_statusSplitter->setStretchFactor(0, 3);
+    m_statusSplitter->setStretchFactor(1, 2);
+    root->addWidget(m_workspace, 1);
 
     setCentralWidget(central);
-    resize(1280, 800);
+    // Start at a proportion of the available screen instead of fixed pixels so
+    // the console stays usable on both small and high-resolution displays.
+    const QRect available = screen() ? screen()->availableGeometry()
+                                     : QRect(0, 0, 1280, 800);
+    const QSize proportional(qMax(1, qRound(available.width() * 0.72)),
+                             qMax(1, qRound(available.height() * 0.80)));
+    const QSize initialSize = responsiveWindowSizeFromEnvironment(
+        "SCOMP_MAIN_SIZE",
+        QSize(qMin(proportional.width(), available.width()),
+              qMin(proportional.height(), available.height())));
+    m_uiScaler = new ResponsiveUiScaler;
+    m_uiScaler->capture(this, QSize(1280, 800), 0.50, 2.5);
+    resize(initialSize);
+    applyResponsiveUi();
     onTickerPresetChanged(0);
     updateTeamPairControls();
 }
@@ -750,6 +1060,9 @@ void MainWindow::startListen()
     if (m_listening) return;
     const quint16 port = static_cast<quint16>(m_portEdit->value());
     if (!m_socket->bind(QHostAddress::AnyIPv4, port)) {
+        qWarning().noquote()
+            << QStringLiteral("[网络] 绑定 UDP %1 失败: %2")
+                   .arg(port).arg(m_socket->errorString());
         m_connLabel->setText(tr("绑定 UDP 端口 %1 失败: %2\n请更换端口或关闭占用该端口的程序后重试。")
                                  .arg(port)
                                  .arg(m_socket->errorString()));
@@ -760,17 +1073,21 @@ void MainWindow::startListen()
     m_listenBtn->setText(tr("停止监听"));
     updateListenInfo();
     onLogMessage(tr("已在 UDP 端口 %1 开始监听").arg(port));
+    qInfo().noquote() << QStringLiteral("[网络] 已开始监听 UDP %1").arg(port);
 }
 
 void MainWindow::stopListen()
 {
     if (!m_listening) return;
+    m_commander->cancelPending();
+    m_pendingAssignments.clear();
     m_socket->close();
     m_listening = false;
     m_portEdit->setEnabled(true);
     m_listenBtn->setText(tr("启动监听"));
     m_connLabel->setText(tr("未在监听。"));
     onLogMessage(tr("已停止监听"));
+    qInfo().noquote() << QStringLiteral("[网络] 已停止监听 UDP");
 }
 
 void MainWindow::populateScreens()
@@ -791,12 +1108,57 @@ void MainWindow::populateScreens()
 
     if (m_screenEdit->count() == 0)
         m_screenEdit->addItem(tr("主屏幕"), 0);
+
+    // Automated layout captures run on a secondary display so the operator's
+    // primary monitor remains untouched. Normal launches keep the user's
+    // current screen selection unchanged.
+    const QString requested = qEnvironmentVariable("SCOMP_BROADCAST_SCREEN")
+                                  .trimmed().toLower();
+    if (!requested.isEmpty() && m_screenEdit->count() > 0) {
+        int requestedIndex = -1;
+        bool numeric = false;
+        const int parsed = requested.toInt(&numeric);
+        if (numeric && parsed >= 0 && parsed < m_screenEdit->count()) {
+            requestedIndex = parsed;
+        } else if (requested == QStringLiteral("secondary")
+                   || requested == QStringLiteral("non-primary")) {
+            const QScreen *primary = QGuiApplication::primaryScreen();
+            const auto screens = QGuiApplication::screens();
+            for (int i = 0; i < screens.size(); ++i) {
+                if (screens.at(i) != primary) {
+                    requestedIndex = i;
+                    break;
+                }
+            }
+        }
+        if (requestedIndex >= 0)
+            m_screenEdit->setCurrentIndex(requestedIndex);
+    }
 }
 
 QScreen *MainWindow::selectedScreen() const
 {
     const auto screens = QGuiApplication::screens();
     if (screens.isEmpty()) return QGuiApplication::primaryScreen();
+
+    // Test hook: keep unattended resolution captures off the user's primary
+    // display.  "secondary" selects the first non-primary screen; a numeric
+    // value selects the same zero-based index shown in the screen combo box.
+    const QByteArray requested = qgetenv("SCOMP_BROADCAST_SCREEN").trimmed().toLower();
+    if (!requested.isEmpty()) {
+        if (requested == QByteArrayLiteral("secondary")) {
+            QScreen *primary = QGuiApplication::primaryScreen();
+            for (QScreen *candidate : screens) {
+                if (candidate != primary)
+                    return candidate;
+            }
+        } else {
+            bool ok = false;
+            const int requestedIndex = requested.toInt(&ok);
+            if (ok && requestedIndex >= 0 && requestedIndex < screens.size())
+                return screens.at(requestedIndex);
+        }
+    }
 
     const int index = m_screenEdit ? m_screenEdit->currentData().toInt() : 0;
     if (index >= 0 && index < screens.size())
@@ -826,56 +1188,240 @@ void MainWindow::onToggleMatch()
 {
     if (!m_broadcast) return;
 
+    const qint64 now = refereeNow();
     if (m_broadcast->isMatchRunning()) {
         m_broadcast->pauseMatch();
+        m_referee.pause(now);
         // V2: 比赛暂停只影响 HUD，不向 ESP32 发命令
+    } else if (m_referee.phase() == MatchReferee::Phase::Paused
+               && !m_broadcast->roundEnded()
+               && (m_broadcast->remainingSeconds() > 0 || m_referee.suddenDeath())) {
+        // Resume: GAME_START would reset the robots to full HP mid-round.
+        m_broadcast->startMatch();
+        m_referee.resume(now);
+    } else if (m_referee.isRunning() && m_broadcast->remainingSeconds() == 0) {
+        // Buzzer confirmation/SD is still this round, never send GAME_START.
+        return;
     } else {
         m_broadcast->startMatch();
+        m_referee.beginRound(m_robots ? m_robots->robots()
+                                      : QVector<RobotManager::RobotInfo>(), now);
+        if (m_summaryToggleBtn) {
+            m_summaryToggleBtn->setEnabled(false);
+            m_summaryToggleBtn->setText(tr("展开赛后数据"));
+        }
         // V2: 对所有已分配 robot_id 单播 GAME_START，ESP32 收到后自设 HP=300
-        if (m_commander && m_robots) {
-            int sent = 0;
-            for (const auto &robot : m_robots->robots()) {
-                if (robot.protocolVersion == proto::kVersion2 && robot.robotId != 0
-                    && robot.online) {
-                    m_commander->sendGameStart(robot.robotId);
-                    ++sent;
-                }
-            }
-            if (sent > 0)
-                onLogMessage(QStringLiteral("[比赛] 已向 %1 台 V2 机器人发送 GAME_START")
-                                 .arg(sent));
+        sendGameCommand(true);
+    }
+    syncRefereeState();
+    refreshRefereeStatus();
+    publishMatchState();
+}
+
+void MainWindow::sendGameCommand(bool start)
+{
+    if (!m_commander || !m_robots)
+        return;
+    int sent = 0;
+    for (const auto &robot : m_robots->robots()) {
+        if (robot.protocolVersion == proto::kVersion2 && robot.robotId != 0
+            && robot.online) {
+            if (start)
+                m_commander->sendGameStart(robot.robotId);
+            else
+                m_commander->sendGameEnd(robot.robotId);
+            ++sent;
         }
     }
+    if (sent > 0)
+        onLogMessage(QStringLiteral("[比赛] 已向 %1 台 V2 机器人发送 %2")
+                         .arg(sent)
+                         .arg(start ? QStringLiteral("GAME_START") : QStringLiteral("GAME_END")));
 }
 
 void MainWindow::onTerminateMatch()
 {
-    if (m_broadcast)
-        m_broadcast->terminateMatch();
-    // V2: 向所有 V2 机器人发送 GAME_END
-    if (m_commander && m_robots) {
-        int sent = 0;
-        for (const auto &robot : m_robots->robots()) {
-            if (robot.protocolVersion == proto::kVersion2 && robot.robotId != 0
-                && robot.online) {
-                m_commander->sendGameEnd(robot.robotId);
-                ++sent;
-            }
-        }
-        if (sent > 0)
-            onLogMessage(QStringLiteral("[比赛] 已向 %1 台 V2 机器人发送 GAME_END")
-                             .arg(sent));
+    if (!m_broadcast || m_broadcast->roundEnded())
+        return;
+    m_referee.terminate(refereeNow());
+    applyVerdict();
+}
+
+void MainWindow::onDeclareRedWin()
+{
+    if (!m_broadcast || m_broadcast->roundEnded())
+        return;
+    m_referee.declareWinner(MatchReferee::kRed, refereeNow());
+    applyVerdict();
+}
+
+void MainWindow::onDeclareBlueWin()
+{
+    if (!m_broadcast || m_broadcast->roundEnded())
+        return;
+    m_referee.declareWinner(MatchReferee::kBlue, refereeNow());
+    applyVerdict();
+}
+
+void MainWindow::onTimeExpired()
+{
+    m_referee.timeExpired(refereeNow());
+    onRefereeTick();
+}
+
+void MainWindow::onRefereeTick()
+{
+    if (m_referee.tick(refereeNow())) {
+        applyVerdict();
+        return;
     }
+    syncRefereeState();
+    refreshRefereeStatus();
+}
+
+void MainWindow::syncRefereeState()
+{
+    if (!m_broadcast) return;
+    const int red = m_referee.team(MatchReferee::kRed).kills;
+    const int blue = m_referee.team(MatchReferee::kBlue).kills;
+    {
+        const QSignalBlocker redBlock(m_redScoreEdit), blueBlock(m_blueScoreEdit);
+        m_redScoreEdit->setValue(red);
+        m_blueScoreEdit->setValue(blue);
+    }
+    if (m_broadcast->redScore() != red || m_broadcast->blueScore() != blue)
+        m_broadcast->setScores(red, blue);
+    if (m_referee.suddenDeath() && !m_broadcast->suddenDeath()
+        && m_referee.phase() != MatchReferee::Phase::Finished) {
+        m_broadcast->setMatchState(0, m_referee.isRunning(), true);
+        onLogMessage(tr("[判定] 常规时间同分，进入 SUDDEN DEATH · 一命定胜负"));
+    }
+    if (m_referee.isRunning())
+        m_broadcast->setRefereeNotice(m_referee.liveNotice());
+}
+
+void MainWindow::applyVerdict()
+{
+    // tick() reports a verdict exactly once; drain it so a verdict produced
+    // directly by terminate()/declareWinner() is not reported again.
+    m_referee.tick(refereeNow());
+    const MatchReferee::Verdict &verdict = m_referee.verdict();
+    if (!verdict.valid || !m_broadcast || m_broadcast->roundEnded())
+        return;
+
+    syncRefereeState(); // The final kill is the point; no extra winner point.
+    // Order matters: the settlement clip must be running before the summary
+    // arrives, so the panel waits for the clip instead of covering it.
+    m_broadcast->concludeRound(verdict.settlementType);
+    m_broadcast->setMatchSummary(m_referee.summaryJson());
+    sendGameCommand(false);
+    onLogMessage(tr("[判定] %1（用时 %2 秒）")
+                     .arg(verdict.reasonText)
+                     .arg(verdict.elapsedMs / 1000.0, 0, 'f', 1));
+    if (m_summaryToggleBtn) {
+        m_summaryToggleBtn->setEnabled(true);
+        m_summaryToggleBtn->setText(tr("展开赛后数据"));
+    }
+    refreshRefereeStatus();
+    publishMatchState();
+}
+
+void MainWindow::onToggleSummary()
+{
+    if (!m_broadcast || m_broadcast->matchSummary().isEmpty())
+        return;
+    const bool expand = !m_broadcast->summaryExpanded();
+    m_broadcast->setSummaryExpanded(expand);
+    if (m_summaryToggleBtn)
+        m_summaryToggleBtn->setText(expand ? tr("收起赛后数据") : tr("展开赛后数据"));
+    publishMatchState();
+}
+
+void MainWindow::loadRefereeRules()
+{
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("MatchReferee"));
+    const MatchReferee::Rules defaults;
+    const QSignalBlocker b2(m_redCardDisqualifiesEdit);
+    const QSignalBlocker b4(m_offlineGraceEdit);
+    m_redCardDisqualifiesEdit->setChecked(
+        settings.value(QStringLiteral("redCardDisqualifies"), defaults.redCardDisqualifies).toBool());
+    m_offlineGraceEdit->setValue(
+        settings.value(QStringLiteral("offlineForfeitSeconds"), defaults.offlineForfeitMs / 1000).toInt());
+    onRefereeRulesChanged();
+}
+
+void MainWindow::onRefereeRulesChanged()
+{
+    if (!m_redCardDisqualifiesEdit || !m_offlineGraceEdit) {
+        return;
+    }
+    MatchReferee::Rules rules = m_referee.rules();
+    rules.redCardDisqualifies = m_redCardDisqualifiesEdit->isChecked();
+    rules.offlineForfeitMs = m_offlineGraceEdit->value() * 1000;
+    m_referee.setRules(rules);
+
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("MatchReferee"));
+    settings.setValue(QStringLiteral("redCardDisqualifies"), rules.redCardDisqualifies);
+    settings.setValue(QStringLiteral("offlineForfeitSeconds"), m_offlineGraceEdit->value());
+    refreshRefereeStatus();
+}
+
+void MainWindow::refreshRefereeStatus()
+{
+    if (!m_refereeStatusLabel)
+        return;
+    const auto side = [this](quint8 team) {
+        const MatchReferee::TeamStats &s = m_referee.team(team);
+        const QString hp = s.hp >= 0 && s.maxHp > 0
+                               ? QStringLiteral("%1%").arg(qRound(s.hp * 100.0 / s.maxHp))
+                               : QStringLiteral("--");
+        QString state = !s.online ? tr("离线") : (s.alive ? tr("存活") : tr("阵亡"));
+        return tr("击杀积分 %1 · HP %2 · 伤害 %3 · %4")
+                   .arg(s.kills).arg(hp).arg(m_referee.damageDealt(team)).arg(state);
+    };
+    QString headline;
+    switch (m_referee.phase()) {
+    case MatchReferee::Phase::Idle: headline = tr("等待开始"); break;
+    case MatchReferee::Phase::Running:
+        headline = m_referee.suddenDeath() ? tr("SUDDEN DEATH · 一命定胜负") : tr("击杀积分赛"); break;
+    case MatchReferee::Phase::Paused: headline = tr("已暂停"); break;
+    case MatchReferee::Phase::Finished: headline = m_referee.verdict().reasonText; break;
+    }
+    const QString notice = m_referee.isRunning() ? m_referee.liveNotice() : QString();
+    const QString text = tr("<b>%1</b>%2<br><span style='color:#d0404c'>红方</span> %3"
+                            "<br><span style='color:#2f7fd8'>蓝方</span> %4")
+                             .arg(headline.toHtmlEscaped(),
+                                  notice.isEmpty() ? QString()
+                                                   : QStringLiteral(" · <span style='color:#b86a12'>%1</span>")
+                                                         .arg(notice.toHtmlEscaped()),
+                                  side(MatchReferee::kRed).toHtmlEscaped(),
+                                  side(MatchReferee::kBlue).toHtmlEscaped());
+    if (m_refereeStatusLabel->text() != text)
+        m_refereeStatusLabel->setText(text);
+    const bool live = m_referee.phase() == MatchReferee::Phase::Running
+                      || m_referee.phase() == MatchReferee::Phase::Paused;
+    if (m_declareRedBtn)
+        m_declareRedBtn->setEnabled(live);
+    if (m_declareBlueBtn)
+        m_declareBlueBtn->setEnabled(live);
 }
 
 void MainWindow::onResetMatch()
 {
     if (m_broadcast)
         m_broadcast->resetMatch();
+    m_referee.reset();
+    if (m_summaryToggleBtn) {
+        m_summaryToggleBtn->setEnabled(false);
+        m_summaryToggleBtn->setText(tr("展开赛后数据"));
+    }
     if (m_redScoreEdit)
         m_redScoreEdit->setValue(0);
     if (m_blueScoreEdit)
         m_blueScoreEdit->setValue(0);
+    refreshRefereeStatus();
 }
 
 void MainWindow::onTestVictoryAnimation()
@@ -890,9 +1436,9 @@ void MainWindow::onTestVictoryAnimation()
                              ? m_settlementPreviewTypeEdit->currentData().toString()
                              : QStringLiteral("redwin");
     m_broadcast->playSettlementPreview(type);
-    onLogMessage(tr("[动画] 已开始播放%1动画预览")
-                     .arg(type == QStringLiteral("bluewin") ? tr("蓝方胜利")
-                                                               : tr("红方胜利")));
+    const QString name = m_settlementPreviewTypeEdit ? m_settlementPreviewTypeEdit->currentText()
+                                                     : tr("红方胜利");
+    onLogMessage(tr("[动画] 已开始播放%1动画预览").arg(name));
 }
 
 void MainWindow::onToggleClientServer()
@@ -937,13 +1483,62 @@ void MainWindow::publishMatchState()
         {QStringLiteral("type"), QStringLiteral("match_state")},
         {QStringLiteral("remainingSeconds"), m_broadcast->remainingSeconds()},
         {QStringLiteral("running"), m_broadcast->isMatchRunning()},
+        {QStringLiteral("suddenDeath"), m_broadcast->suddenDeath()},
+        {QStringLiteral("scoringRule"), QStringLiteral("kills")},
         {QStringLiteral("redScore"), m_broadcast->redScore()},
         {QStringLiteral("blueScore"), m_broadcast->blueScore()},
         {QStringLiteral("ended"), m_broadcast->roundEnded()},
         {QStringLiteral("settlement"), m_broadcast->settlementType()},
         {QStringLiteral("redName"), m_broadcast->redTeamName()},
-        {QStringLiteral("blueName"), m_broadcast->blueTeamName()}
+        {QStringLiteral("blueName"), m_broadcast->blueTeamName()},
+        {QStringLiteral("notice"), m_broadcast->refereeNotice()},
+        {QStringLiteral("summary"), m_broadcast->roundEnded() ? m_broadcast->matchSummary()
+                                                              : QJsonObject()},
+        {QStringLiteral("summaryExpanded"), m_broadcast->summaryExpanded()}
     });
+}
+
+void MainWindow::refreshFieldCameraDevices()
+{
+    if (!m_fieldCameraEdit || !m_fieldCamera) return;
+    const QSignalBlocker blocker(m_fieldCameraEdit);
+    const QByteArray selected = m_fieldCamera->selectedDevice();
+    m_fieldCameraEdit->clear();
+    m_fieldCameraEdit->addItem(tr("请选择摄像头"), QByteArray());
+    for (const auto &device : m_fieldCamera->devices())
+        m_fieldCameraEdit->addItem(device.name, device.id);
+    int index = m_fieldCameraEdit->findData(selected);
+    if (!selected.isEmpty() && index < 0) {
+        m_fieldCameraEdit->addItem(tr("上次所选设备（未连接）"), selected);
+        index = m_fieldCameraEdit->count() - 1;
+    }
+    m_fieldCameraEdit->setCurrentIndex(qMax(0, index));
+    m_fieldCameraEdit->setToolTip(tr("按设备 ID 区分同名摄像头；未检测到设备时，请检查 USB 连接及 Windows 摄像头权限。"));
+}
+
+void MainWindow::onFieldCameraSelected()
+{
+    if (!m_fieldCamera || !m_fieldCameraEdit) return;
+    const QByteArray id = m_fieldCameraEdit->currentData().toByteArray();
+    m_fieldCamera->selectDevice(id);
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("FieldCamera"));
+    settings.setValue(QStringLiteral("deviceId"), id);
+}
+
+void MainWindow::onToggleFieldCamera()
+{
+    if (m_fieldCamera->requested()) m_fieldCamera->stop();
+    else m_fieldCamera->start();
+}
+
+void MainWindow::onFieldCameraStateChanged()
+{
+    if (!m_fieldCameraStatus) return;
+    m_fieldCameraStatus->setText(m_fieldCamera->status());
+    m_fieldCameraToggle->setText(m_fieldCamera->requested() ? tr("停止采集") : tr("启动采集"));
+    updateProgramSourceList();
+    rebuildSourcePreviewStrip();
 }
 
 void MainWindow::onProgramModeChanged(int)
@@ -985,9 +1580,15 @@ void MainWindow::onAutoSwitchTimeout()
     if (!m_programSourceEdit || m_programSourceEdit->count() < 2)
         return;
 
-    const int nextIndex = (m_programSourceEdit->currentIndex() + 1)
-                          % m_programSourceEdit->count();
-    m_programSourceEdit->setCurrentIndex(nextIndex);
+    const int count = m_programSourceEdit->count();
+    for (int step = 1; step <= count; ++step) {
+        const int next = (m_programSourceEdit->currentIndex() + step) % count;
+        const QString id = m_programSourceEdit->itemData(next).toString();
+        if (id == QStringLiteral("field") && (!m_fieldCamera || !m_fieldCamera->live()))
+            continue; // A placeholder/offline local camera must not blank auto-program.
+        m_programSourceEdit->setCurrentIndex(next);
+        break;
+    }
 }
 
 void MainWindow::onTickerPresetChanged(int index)
@@ -1237,6 +1838,10 @@ void MainWindow::applyTeamPair(int index, bool resetMatch)
     m_broadcast->setTeamNames(pair.redName, pair.blueName);
     if (resetMatch) {
         m_broadcast->resetMatch();
+        m_referee.reset();
+        if (m_summaryToggleBtn)
+            m_summaryToggleBtn->setEnabled(false);
+        refreshRefereeStatus();
         if (m_redScoreEdit)
             m_redScoreEdit->setValue(0);
         if (m_blueScoreEdit)
@@ -1253,6 +1858,7 @@ void MainWindow::onScoresChanged()
         return;
     const int redScore = m_redScoreEdit ? m_redScoreEdit->value() : 0;
     const int blueScore = m_blueScoreEdit ? m_blueScoreEdit->value() : 0;
+    m_referee.setScores(redScore, blueScore);
     m_broadcast->setScores(redScore, blueScore);
 }
 
@@ -1267,8 +1873,11 @@ void MainWindow::onAwardRedCard()
         onLogMessage(tr("请先在机器人状态表中选中需要判罚的机器人"));
         return;
     }
-    m_broadcast->awardCard(static_cast<quint8>(teamItem->text().toInt()), true);
+    const quint8 team = static_cast<quint8>(teamItem->text().toInt());
+    m_broadcast->awardCard(team, true);
     onLogMessage(tr("[牌面] 已为队伍 %1 显示红牌").arg(teamItem->text()));
+    m_referee.recordPenalty(team, true, refereeNow());
+    onRefereeTick();
 }
 
 void MainWindow::onAwardYellowCard()
@@ -1287,6 +1896,9 @@ void MainWindow::onAwardYellowCard()
     const quint8 robotId = static_cast<quint8>(idItem->text().toInt());
     m_broadcast->awardCard(team, false);
     onLogMessage(tr("[牌面] 已为队伍 %1 显示黄牌").arg(team));
+    // Record before sending: the third card's HP drop must not be read as a
+    // knockout, and its 50 HP must not be credited to the opponent.
+    m_referee.recordPenalty(team, false, refereeNow());
     // V2: 同时向 ESP32 下发黄牌命令（L431 内部扣分，第 3 次判负）
     if (m_commander) {
         const quint32 txid = m_commander->sendYellowCard(robotId);
@@ -1294,6 +1906,7 @@ void MainWindow::onAwardYellowCard()
             onLogMessage(tr("[牌面] 机器人 %1 未连接 ESP32，黄牌仅显示未下发")
                              .arg(robotId));
     }
+    onRefereeTick();
 }
 
 void MainWindow::onClearCards()
@@ -1384,8 +1997,11 @@ void MainWindow::rebuildSourcePreviewStrip()
     // per-source cells. Rebuilding is cheap because the source list changes
     // far less often than the frame rate.
     while (QLayoutItem *item = m_sourcePreviewLayout->takeAt(0)) {
-        if (QWidget *widget = item->widget())
+        if (QWidget *widget = item->widget()) {
+            widget->hide();
+            widget->setParent(nullptr); // Exclude deferred old cells from lookups immediately.
             widget->deleteLater();
+        }
         delete item;
     }
     m_sourcePreviewViews.clear();
@@ -1399,23 +2015,31 @@ void MainWindow::rebuildSourcePreviewStrip()
                                   : tr("蓝方");
 
     int added = 0;
-    for (const auto &source : m_videoSources) {
-        if (!source.online || source.sourceId.isEmpty()
-            || (source.team != 1 && source.team != 2))
+    QVector<MatchServer::VideoSourceInfo> previewSources = m_videoSources;
+    MatchServer::VideoSourceInfo field;
+    field.sourceId = QStringLiteral("field");
+    field.sourceName = tr("本地全场摄像头");
+    field.online = true;
+    previewSources.prepend(field);
+    for (const auto &source : previewSources) {
+        if (!source.online || source.sourceId.isEmpty())
             continue;
 
         auto *cell = new QWidget;
         auto *cellLayout = new QVBoxLayout(cell);
         cellLayout->setContentsMargins(0, 0, 0, 0);
-        cellLayout->setSpacing(4);
+        cellLayout->setSpacing(qMax(1, qRound(4 * m_controlUiScale)));
 
         auto *thumb = new QLabel(cell);
-        thumb->setFixedSize(192, 108);
+        thumb->setFixedSize(qMax(1, qRound(192 * m_controlUiScale)),
+                            qMax(1, qRound(108 * m_controlUiScale)));
         thumb->setAlignment(Qt::AlignCenter);
         thumb->setStyleSheet(QStringLiteral(
             "QLabel { background: #101418; border: 2px solid #2c333b;"
             " border-radius: 4px; color: #6c7886; }"));
-        thumb->setText(tr("无信号"));
+        thumb->setText(source.sourceId == QStringLiteral("field") ? tr("全场摄像头\n未启动 / 无信号") : tr("无信号"));
+        if (source.sourceId == QStringLiteral("field"))
+            thumb->setObjectName(QStringLiteral("fieldCameraThumbnail"));
         thumb->setCursor(Qt::PointingHandCursor);
         thumb->setToolTip(tr("点击切换到该视角"));
 
@@ -1430,10 +2054,15 @@ void MainWindow::rebuildSourcePreviewStrip()
                                     ? tr("选手%1").arg(source.robotId > 0 ? source.robotId : 1)
                                     : source.displayName;
         auto *caption = new QLabel(
-            tr("%1 · %2号\n%3").arg(teamName).arg(source.robotId > 0 ? source.robotId : 1)
+            source.sourceId == QStringLiteral("field")
+                ? tr("全场 · 本地摄像头\n%1").arg(m_fieldCamera && m_fieldCamera->live() ? tr("采集中") : tr("无信号"))
+                : tr("%1 · %2号\n%3").arg(teamName).arg(source.robotId > 0 ? source.robotId : 1)
                                .arg(display), cell);
         caption->setAlignment(Qt::AlignCenter);
-        caption->setStyleSheet(QStringLiteral("color: #cfd7df; font-size: 11px;"));
+        caption->setStyleSheet(QStringLiteral("color: #cfd7df;"));
+        QFont captionFont = caption->font();
+        captionFont.setPointSizeF(qMax(6.0, 11.0 * m_controlUiScale));
+        caption->setFont(captionFont);
         caption->setWordWrap(true);
 
         cellLayout->addWidget(thumb);
@@ -1443,12 +2072,14 @@ void MainWindow::rebuildSourcePreviewStrip()
         m_sourcePreviewLayout->insertWidget(m_sourcePreviewLayout->count() - 1,
                                             cell);
         ++added;
+        onSourceFrameUpdated(sourceId); // Restore cached frames after list/scale changes.
     }
 
     if (added == 0) {
         auto *empty = new QLabel(tr("暂无已登记选手端"), m_sourcePreviewGroup);
         empty->setAlignment(Qt::AlignCenter);
-        empty->setStyleSheet(QStringLiteral("color: #6c7886; padding: 24px;"));
+        empty->setStyleSheet(QStringLiteral("color: #6c7886; padding: %1px;")
+                                 .arg(qMax(1, qRound(24 * m_controlUiScale))));
         m_sourcePreviewLayout->insertWidget(0, empty);
     }
     refreshSourcePreviewBadges();
@@ -1465,10 +2096,67 @@ void MainWindow::refreshSourcePreviewBadges()
             continue;
         const bool isActive = it.key() == activeId;
         thumb->setStyleSheet(QStringLiteral(
-            "QLabel { background: #101418; border: 2px solid %1;"
-            " border-radius: 4px; color: #6c7886; }")
+            "QLabel { background: #101418; border: %1px solid %2;"
+            " border-radius: %3px; color: #6c7886; }")
+                                 .arg(qMax(1, qRound(2 * m_controlUiScale)))
                                  .arg(isActive ? QStringLiteral("#ffd76a")
-                                               : QStringLiteral("#2c333b")));
+                                               : QStringLiteral("#2c333b"))
+                                 .arg(qMax(1, qRound(4 * m_controlUiScale))));
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    applyResponsiveUi();
+}
+
+void MainWindow::applyResponsiveUi()
+{
+    if (!m_uiScaler)
+        return;
+
+    m_controlUiScale = m_uiScaler->apply(size());
+    if (QWidget *central = centralWidget())
+        central->setStyleSheet(controlStyleSheet(m_controlUiScale));
+
+    if (m_table && m_table->horizontalHeader())
+        m_table->horizontalHeader()->resizeSection(
+            kColState, qMax(1, qRound(64 * m_controlUiScale)));
+
+    if (!m_workspace)
+        return;
+    // Stack the panes only on narrow or portrait windows. At 4:3 (e.g.
+    // 1024x768) stacking left the control column with ~90 px of height.
+    const Qt::Orientation desired =
+        (width() < 960 || width() < qRound(height() * 1.15))
+            ? Qt::Vertical
+            : Qt::Horizontal;
+    if (desired != m_workspaceOrientation) {
+        m_workspaceOrientation = desired;
+        m_workspace->setOrientation(desired);
+    }
+    // Reapply splitter proportions even when the orientation did not change.
+    // The first resize can happen before the native window is shown, when the
+    // splitter has zero height; skipping this pass leaves the control pane
+    // collapsed after a small-window launch.
+    if (desired == Qt::Horizontal) {
+        m_workspace->setStretchFactor(0, 1);
+        m_workspace->setStretchFactor(1, 2);
+        // Narrow windows give the controls a larger share so form rows keep
+        // their labels and buttons on one line.
+        // resizeEvent runs before the splitter itself is resized, so derive
+        // the span from the window instead of the splitter's stale width.
+        const int span = qMax(m_workspace->width(),
+                              width() - qRound(28 * m_controlUiScale));
+        const qreal controlShare = width() < 1360 ? 0.42 : 0.34;
+        m_workspace->setSizes({qMax(1, qRound(span * controlShare)),
+                               qMax(1, qRound(span * (1.0 - controlShare)))});
+    } else {
+        m_workspace->setStretchFactor(0, 1);
+        m_workspace->setStretchFactor(1, 1);
+        m_workspace->setSizes({qMax(1, qRound(m_workspace->height() * 0.52)),
+                               qMax(1, qRound(m_workspace->height() * 0.48))});
     }
 }
 
@@ -1493,8 +2181,11 @@ void MainWindow::onSourceFrameUpdated(const QString &sourceId)
     if (!thumb || !m_broadcast)
         return;
     const QImage frame = m_broadcast->sourceFrame(sourceId);
-    if (frame.isNull())
+    if (frame.isNull()) {
+        thumb->setPixmap(QPixmap());
+        thumb->setText(tr("无信号"));
         return;
+    }
     thumb->setPixmap(QPixmap::fromImage(frame).scaled(
         thumb->size(), Qt::KeepAspectRatioByExpanding, Qt::FastTransformation));
 }
@@ -1596,8 +2287,23 @@ void MainWindow::onReadyRead()
 {
     while (m_socket->hasPendingDatagrams()) {
         const QNetworkDatagram dg = m_socket->receiveDatagram();
-        if (dg.isValid())
+        if (!dg.isValid())
+            continue;
+        try {
+            proto::Frame health;
+            if (m_checkinPanel && dg.senderAddress().protocol() == QAbstractSocket::IPv4Protocol
+                && proto::parseDatagram(dg.data(), health) && health.version == proto::kVersion2
+                && health.type == proto::TypeDeviceHealth && health.robotId != 0) {
+                m_checkinPanel->observeDeviceHealth(health.robotId, health.componentOnline,
+                                                    dg.senderAddress().toString());
+            }
             m_robots->handleDatagram(dg.data(), dg.senderAddress(), dg.senderPort());
+        } catch (const std::exception &error) {
+            qCritical().noquote()
+                << QStringLiteral("[UDP] 处理 %1:%2 的数据报发生异常: %3")
+                       .arg(dg.senderAddress().toString()).arg(dg.senderPort())
+                       .arg(QString::fromUtf8(error.what()));
+        }
     }
 }
 
@@ -1618,26 +2324,128 @@ void MainWindow::onRobotAck(quint8 ackedType, quint32 txid, quint8 result,
         m_commander->onAck(ackedType, txid, result, robotId);
 }
 
-void MainWindow::onEndpointLearned(quint8 robotId, const QHostAddress &ip,
+void MainWindow::onEndpointLearned(quint8 robotId, quint32 ipv4,
                                    quint16 port)
 {
     if (m_commander)
-        m_commander->learnEndpoint(robotId, ip, port);
+        m_commander->learnEndpoint(robotId, ipv4, port);
 }
 
 // ---------- V2 设备管理 ----------
 
 void MainWindow::onAssignTeam()
 {
-    if (!m_robots || !m_deviceRobotEdit || !m_deviceTeamEdit)
+    if (!m_robots || !m_commander || !m_deviceRobotEdit || !m_deviceTeamEdit
+        || !m_deviceSelectEdit || !m_deviceControllerMacEdit)
         return;
+
+    RobotManager::DeviceInfo device;
+    const QString deviceMac = m_deviceSelectEdit->currentData().toString();
+    if (!m_robots->deviceForMac(deviceMac, &device)) {
+        onLogMessage(tr("[设备] 尚未收到可分配的 ESP32 DEVICE_ANNOUNCE"));
+        return;
+    }
+
+    QString controllerMacText = m_deviceControllerMacEdit->text().trimmed();
+    if (controllerMacText.isEmpty())
+        controllerMacText = device.controllerMac;
+    QByteArray controllerMac;
+    QString macError;
+    if (!parseMac6(controllerMacText, &controllerMac, &macError)
+        || controllerMac == QByteArray(6, char(0))) {
+        if (macError.isEmpty())
+            macError = tr("手柄 MAC 不能全部为零");
+        onLogMessage(tr("[设备] 手柄 MAC 无效: %1").arg(macError));
+        return;
+    }
+
     const quint8 robotId = static_cast<quint8>(m_deviceRobotEdit->value());
     const quint8 team = static_cast<quint8>(m_deviceTeamEdit->currentData().toInt());
-    m_robots->setTeamForRobot(robotId, team);
-    onLogMessage(tr("[设备] 机器人 %1 分配到 %2")
+    if (!m_listening) {
+        onLogMessage(tr("[设备] 请先启动 UDP 监听，再分配队伍"));
+        return;
+    }
+    for (const auto &other : m_robots->devices()) {
+        if (other.deviceMac != deviceMac && other.robotId == robotId
+            && QDateTime::currentMSecsSinceEpoch() - other.lastSeenMs < 5000) {
+            onLogMessage(tr("[设备] 此机器人 ID 已由另一台在线设备使用"));
+            return;
+        }
+    }
+    for (const auto &pending : std::as_const(m_pendingAssignments)) {
+        if (pending.deviceMac == deviceMac || pending.robotId == robotId) {
+            onLogMessage(tr("[设备] 此设备或机器人 ID 正在等待分配回执，请稍后重试"));
+            return;
+        }
+    }
+    const QByteArray deviceBytes = macBytes(device.deviceMac);
+    if (deviceBytes.size() != 6 || device.ipv4 == 0) {
+        onLogMessage(tr("[设备] ESP32 %1 的网络地址或 MAC 无效").arg(device.deviceMac));
+        return;
+    }
+
+    const quint32 txid = m_commander->sendAssignment(
+        device.ipv4, robotId, deviceBytes, controllerMac);
+    if (txid == 0) {
+        onLogMessage(tr("[设备] ASSIGNMENT 发送失败，请检查 UDP 5006 和网络地址"));
+        return;
+    }
+
+    m_pendingAssignments.insert(txid, {robotId, team, device.deviceMac});
+    onLogMessage(tr("[设备] 已请求 ESP32 %1 分配为机器人 %2（%3），手柄 %4，txid=%5；等待 ACK")
+                     .arg(device.deviceMac)
                      .arg(robotId)
-                     .arg(team == 0 ? tr("未分配") : (team == 1 ? tr("红方") : tr("蓝方"))));
+                     .arg(team == 0 ? tr("未分配") : (team == 1 ? tr("红方") : tr("蓝方")))
+                     .arg(controllerMacText)
+                     .arg(txid));
     refreshTable();
+}
+
+void MainWindow::refreshDeviceList()
+{
+    if (!m_robots || !m_deviceSelectEdit)
+        return;
+
+    const QString previousMac = m_deviceSelectEdit->currentData().toString();
+    const QVector<RobotManager::DeviceInfo> devices = m_robots->devices();
+    QSignalBlocker blocker(m_deviceSelectEdit);
+    m_deviceSelectEdit->clear();
+    if (devices.isEmpty()) {
+        m_deviceSelectEdit->addItem(tr("等待 ESP32 DEVICE_ANNOUNCE..."), QString());
+        return;
+    }
+
+    for (const RobotManager::DeviceInfo &device : devices) {
+        const QString robotText = device.robotId == 0
+                                      ? tr("未分配")
+                                      : tr("机器人 %1").arg(device.robotId);
+        const QString controller = device.controllerMac.isEmpty()
+                                       ? tr("手柄未分配")
+                                       : device.controllerMac;
+        m_deviceSelectEdit->addItem(
+            tr("%1 | %2 | %3 | %4").arg(device.deviceMac, robotText,
+                                        device.addressText, controller),
+            device.deviceMac);
+    }
+
+    int index = m_deviceSelectEdit->findData(previousMac);
+    if (index < 0 && m_deviceSelectEdit->count() > 0)
+        index = 0;
+    if (index >= 0)
+        m_deviceSelectEdit->setCurrentIndex(index);
+
+    RobotManager::DeviceInfo selected;
+    if (m_robots->deviceForMac(m_deviceSelectEdit->currentData().toString(), &selected)) {
+        const bool selectionChanged = previousMac != selected.deviceMac;
+        if (m_deviceControllerMacEdit
+            && (selectionChanged || m_deviceControllerMacEdit->property("reportedMac").toString() != selected.controllerMac))
+            m_deviceControllerMacEdit->setText(selected.controllerMac);
+        if (m_deviceRobotEdit && selected.robotId != 0
+            && (selectionChanged || m_deviceRobotEdit->property("reportedId").toUInt() != selected.robotId))
+            m_deviceRobotEdit->setValue(selected.robotId);
+        m_deviceControllerMacEdit->setProperty("reportedMac", selected.controllerMac);
+        m_deviceRobotEdit->setProperty("reportedId", selected.robotId);
+    }
 }
 
 void MainWindow::onForcePowerOn()
@@ -1765,12 +2573,12 @@ void MainWindow::refreshTable()
                 ? QString::number(r.power) : tr("-"));
         powerItem->setTextAlignment(Qt::AlignCenter);
         auto powerOnItem = new QTableWidgetItem(
-            r.protocolVersion == proto::kVersion2
+            r.online && r.protocolVersion == proto::kVersion2
                 ? (r.powerOn ? tr("已通电") : tr("已断电")) : tr("-"));
         powerOnItem->setForeground(r.powerOn ? green : red);
         powerOnItem->setTextAlignment(Qt::AlignCenter);
         auto linkItem = new QTableWidgetItem(
-            r.protocolVersion == proto::kVersion2
+            r.online && r.protocolVersion == proto::kVersion2
                 ? (r.linkUp ? tr("正常") : tr("断开")) : tr("-"));
         linkItem->setForeground(r.linkUp ? green : red);
         linkItem->setTextAlignment(Qt::AlignCenter);
@@ -1784,9 +2592,9 @@ void MainWindow::refreshTable()
         auto shootItem = new QTableWidgetItem(shootText);
         shootItem->setForeground(shootColor);
         shootItem->setTextAlignment(Qt::AlignCenter);
-        const QString src = r.addr.isNull()
+        const QString src = r.addressText.isEmpty()
                                  ? QString()
-                                 : QStringLiteral("%1:%2").arg(r.addr.toString()).arg(r.port);
+                                 : QStringLiteral("%1:%2").arg(r.addressText).arg(r.sourcePort);
         auto addrItem = new QTableWidgetItem(src);
 
         m_table->setItem(row, kColId, idItem);
@@ -1807,6 +2615,8 @@ void MainWindow::refreshTable()
 
     statusBar()->showMessage(tr("在线 %1 / %2 台机器人").arg(onlineCount).arg(kExpectedRobots));
 
+    m_referee.updateRobots(allBots, refereeNow());
+    syncRefereeState();
     if (m_broadcast)
         m_broadcast->updateRobots(bots);
     if (m_matchServer)

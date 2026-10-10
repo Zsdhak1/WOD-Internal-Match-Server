@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>赛事成绩 · 全队排名</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/display-clean.css"><script src="/display.js" defer></script></head>
+<body class="display-body">
+<main class="broadcast">
+<header class="broadcast-header"><h1 id="display-title">赛事成绩 · 全队排名</h1><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">正在连接</span></div></header>
+<section class="metrics" aria-label="赛事概况"><div><span>参赛队伍</span><strong id="team-count">—</strong></div><div><span>已完成比赛</span><strong id="finished-count">—</strong></div></section>
+<div id="display-error" class="display-error" role="status" hidden></div>
+<section class="standings-panel" aria-label="队伍排名"><div class="arena-corner top-left" aria-hidden="true"></div><div class="arena-corner top-right" aria-hidden="true"></div><div class="arena-corner bottom-left" aria-hidden="true"></div><div class="arena-corner bottom-right" aria-hidden="true"></div><div class="panel-heading"><h2>积分排名</h2><span id="range-label">所有队伍</span></div><div class="table-space" id="table-space"><table class="standings-table"><colgroup><col class="rank-col"><col class="name-col"><col class="played-col"><col><col><col><col><col></colgroup><thead><tr><th>排名</th><th>队伍</th><th>场次</th><th>胜</th><th>负</th><th>击杀积分</th><th>被击杀</th><th>净击杀</th></tr></thead><tbody id="standings"></tbody></table><div id="empty-state" class="display-empty" hidden><h2>等待参赛队伍</h2></div></div></section>
+<section class="recent-bar" aria-label="最新比赛"><span class="recent-label">最新赛况</span><div id="recent-match">暂无比赛记录</div></section>
+<footer class="broadcast-footer"><div class="update-status" id="update-status" role="status"><span class="update-label">数据更新时间</span><time id="update-time">等待数据</time></div><nav class="page-controls" aria-label="翻页控制"><button id="previous" title="上一页（←）" aria-label="上一页">←</button><span id="page-label" aria-live="polite">第 1 / 1 页</span><button id="next" title="下一页（→）" aria-label="下一页">→</button><button id="pause" aria-pressed="false">暂停轮播</button><label class="interval-label">每页 <select id="interval" aria-label="每页展示时长"><option value="8">8秒</option><option value="12" selected>12秒</option><option value="20">20秒</option><option value="30">30秒</option></select></label><button id="fullscreen">全屏</button></nav></footer>
+<div class="cycle-track" aria-hidden="true"><div id="cycle-progress"></div></div>
+</main>
+</body></html>

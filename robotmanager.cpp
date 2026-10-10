@@ -3,19 +3,42 @@
 
 #include <QDateTime>
 #include <QSettings>
+#include <QStringList>
 #include <QTimer>
 #include <QUdpSocket>
+
+#include <algorithm>
 
 namespace {
 // 状态帧约 10 Hz 上报一次；连续超过该时长未收到任何帧，判定该车离线。
 constexpr qint64 kOfflineAfterMs = 800;
 constexpr int    kSweepIntervalMs = 200;
+constexpr qint64 kInvalidFrameLogIntervalMs = 1000;
 
 inline QString robotTag(quint8 team, quint8 id)
 {
     return team == 0
                ? QStringLiteral("机器人%1（未分配队伍）").arg(id)
                : QStringLiteral("队伍%1·机器人%2").arg(team).arg(id);
+}
+
+QString macText(const QByteArray &mac)
+{
+    QStringList parts;
+    parts.reserve(6);
+    for (const char byte : mac)
+        parts.append(QStringLiteral("%1").arg(static_cast<quint8>(byte), 2, 16,
+                                              QLatin1Char('0')).toUpper());
+    return parts.join(QLatin1Char(':'));
+}
+
+bool hasNonZeroByte(const QByteArray &bytes)
+{
+    for (const char byte : bytes) {
+        if (byte != 0)
+            return true;
+    }
+    return false;
 }
 } // namespace
 
@@ -35,12 +58,95 @@ void RobotManager::handleDatagram(const QByteArray &data,
                                   const QHostAddress &addr, quint16 port)
 {
     proto::Frame f;
-    if (!proto::parseDatagram(data, f))
-        return; // 非法帧直接丢弃
+    if (!proto::parseDatagram(data, f)) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastInvalidFrameLogMs >= kInvalidFrameLogIntervalMs) {
+            m_lastInvalidFrameLogMs = now;
+            const QByteArray prefix = data.left(16).toHex(' ');
+            qWarning().noquote()
+                << QStringLiteral("[UDP] 丢弃非法帧 %1:%2 size=%3 prefix=%4")
+                       .arg(addr.toString()).arg(port).arg(data.size())
+                       .arg(QString::fromLatin1(prefix));
+        }
+        return;
+    }
 
     // V2 ACK 帧不属于机器人状态，直接转发给下行管理器
     if (f.version == proto::kVersion2 && f.type == proto::TypeAck) {
         emit ackReceived(f.ackedFrameType, f.transactionId, f.result, f.robotId);
+        return;
+    }
+
+    if (addr.protocol() != QAbstractSocket::IPv4Protocol) {
+        qWarning().noquote() << QStringLiteral("[UDP] 非 IPv4 来源已忽略: %1:%2")
+                                    .arg(addr.toString()).arg(port);
+        return;
+    }
+
+    const quint32 senderIpv4 = addr.toIPv4Address();
+    const QString senderText = addr.toString();
+
+    // DEVICE_ANNOUNCE is the stable identity/registry frame. It may carry
+    // robot_id=0 before assignment, so it must not create a fake robot 0.
+    if (f.version == proto::kVersion2 && f.type == proto::TypeDeviceAnnounce) {
+        const QString deviceMac = macText(f.deviceMac);
+        if (deviceMac.isEmpty()) {
+            qWarning().noquote() << QStringLiteral("[设备] DEVICE_ANNOUNCE 缺少 ESP32 MAC");
+            return;
+        }
+
+        const bool isNew = !m_devices.contains(deviceMac);
+        DeviceInfo &device = m_devices[deviceMac];
+        const quint8 previousId = device.robotId;
+        if (previousId != 0 && previousId != f.robotId) {
+            const int oldIndex = m_index.value(keyOfV2(previousId), -1);
+            m_index.remove(keyOfV2(previousId));
+            if (oldIndex >= 0 && oldIndex < m_robots.size()
+                && m_robots[oldIndex].protocolVersion == proto::kVersion2
+                && m_robots[oldIndex].robotId == previousId) {
+                m_robots.removeAt(oldIndex);
+                for (auto it = m_index.begin(); it != m_index.end(); ++it)
+                    if (it.value() > oldIndex) --it.value();
+            }
+            m_robotTeamMap.remove(previousId);
+            saveTeamMap();
+            m_endpoints.remove(previousId);
+            emit endpointForgotten(previousId);
+            emit robotsChanged();
+        }
+        device.deviceMac = deviceMac;
+        device.controllerMac = hasNonZeroByte(f.controllerMac)
+                                   ? macText(f.controllerMac) : QString();
+        device.addressText = senderText;
+        device.ipv4 = senderIpv4;
+        device.sourcePort = port;
+        device.robotId = f.robotId;
+        device.eventQueueDrops = f.eventQueueDrops;
+        device.udpSendFailures = f.udpSendFailures;
+        device.lastSeenMs = QDateTime::currentMSecsSinceEpoch();
+        if (device.firstSeenMs == 0) device.firstSeenMs = device.lastSeenMs;
+
+        if (f.robotId != 0) {
+            m_endpoints.insert(f.robotId, {senderIpv4, proto::kDownlinkPort});
+            emit endpointLearned(f.robotId, senderIpv4, proto::kDownlinkPort);
+        }
+
+        if (isNew) {
+            qInfo().noquote()
+                << QStringLiteral("[设备] 发现 ESP32 %1 @%2 robot=%3 controller=%4")
+                       .arg(deviceMac, senderText)
+                       .arg(f.robotId == 0 ? QStringLiteral("未分配")
+                                           : QString::number(f.robotId),
+                            device.controllerMac.isEmpty()
+                                ? QStringLiteral("未分配") : device.controllerMac);
+        }
+
+        emit devicesChanged();
+        return;
+    }
+
+    if (f.version == proto::kVersion2 && f.type == proto::TypeDeviceHealth
+        && f.robotId == 0) {
         return;
     }
 
@@ -72,13 +178,15 @@ void RobotManager::handleDatagram(const QByteArray &data,
     const quint8 prevVersion = r.protocolVersion;
     r.online = true;
     r.lastSeenMs = QDateTime::currentMSecsSinceEpoch();
-    r.addr = addr;
-    r.port = port;
+    if (r.firstSeenMs == 0) r.firstSeenMs = r.lastSeenMs;
+    r.addressText = senderText;
+    r.sourcePort = port;
     r.protocolVersion = f.version;
     if (f.version == proto::kVersion2) {
         r.team = team;   // V2 team 来自服务器映射，可能为 0
-        m_endpoints.insert(f.robotId, {addr, port});
-        emit endpointLearned(f.robotId, addr, port);
+        r.downlinkPort = proto::kDownlinkPort;
+        m_endpoints.insert(f.robotId, {senderIpv4, proto::kDownlinkPort});
+        emit endpointLearned(f.robotId, senderIpv4, proto::kDownlinkPort);
     } else if (team != r.team && r.team != 0) {
         // V1 帧自带 team；以帧为准但记录
         r.team = team;
@@ -105,7 +213,7 @@ void RobotManager::handleDatagram(const QByteArray &data,
             r.heat = f.heat;
             r.power = f.power;
             r.powerOn = f.powerOn;
-        } else if (f.version == proto::kVersion1 && f.heat != 0) {
+        } else if (f.version == proto::kVersion1 && data.size() == 12) {
             r.heat = f.heat;
         }
         r.alive = f.alive;
@@ -155,6 +263,25 @@ void RobotManager::handleDatagram(const QByteArray &data,
         emit logMessage(QStringLiteral("[链路] %1 L431 业务链路恢复")
                             .arg(robotTag(r.team, f.robotId)));
         break;
+    case proto::TypeCombatEnd:
+        // A pause in firing does not revoke shooting permission. Only the
+        // dedicated permission event or the next STATUS defines that state.
+        emit logMessage(QStringLiteral("[战斗] %1 脱离战斗")
+                            .arg(robotTag(r.team, f.robotId)));
+        break;
+    case proto::TypeDeviceHealth:
+        {
+        const bool wasLinkUp = r.linkUp;
+        r.componentOnline = f.componentOnline;
+        r.healthReceived = true;
+        r.lastHealthSeenMs = r.lastSeenMs;
+        r.linkUp = (f.componentOnline & 0x01U) != 0;
+        if (!r.linkUp && wasLinkUp)
+            emit logMessage(QStringLiteral("[健康] %1 L431 离线，组件位图=0x%2")
+                                .arg(robotTag(r.team, f.robotId))
+                                .arg(f.componentOnline, 2, 16, QLatin1Char('0')));
+        break;
+        }
     default:
         break;
     }
@@ -193,6 +320,31 @@ QVector<RobotManager::RobotInfo> RobotManager::robots() const
     return m_robots;
 }
 
+QVector<RobotManager::DeviceInfo> RobotManager::devices() const
+{
+    QVector<DeviceInfo> result;
+    result.reserve(m_devices.size());
+    for (auto it = m_devices.constBegin(); it != m_devices.constEnd(); ++it)
+        result.append(it.value());
+    std::sort(result.begin(), result.end(), [](const DeviceInfo &left,
+                                               const DeviceInfo &right) {
+        if (left.robotId != right.robotId)
+            return left.robotId < right.robotId;
+        return left.deviceMac < right.deviceMac;
+    });
+    return result;
+}
+
+bool RobotManager::deviceForMac(const QString &deviceMac, DeviceInfo *device) const
+{
+    const auto it = m_devices.constFind(deviceMac.trimmed().toUpper());
+    if (it == m_devices.constEnd())
+        return false;
+    if (device)
+        *device = it.value();
+    return true;
+}
+
 // ---------- V2: team 映射 ----------
 
 void RobotManager::setTeamForRobot(quint8 robotId, quint8 team)
@@ -217,13 +369,13 @@ quint8 RobotManager::teamForRobot(quint8 robotId) const
 
 // ---------- V2: 端点学习 ----------
 
-bool RobotManager::endpointForRobot(quint8 robotId, QHostAddress *ip,
+bool RobotManager::endpointForRobot(quint8 robotId, quint32 *ipv4,
                                     quint16 *port) const
 {
     const auto it = m_endpoints.constFind(robotId);
     if (it == m_endpoints.constEnd())
         return false;
-    if (ip) *ip = it->first;
+    if (ipv4) *ipv4 = it->first;
     if (port) *port = it->second;
     return true;
 }
@@ -265,14 +417,21 @@ void RobotManager::sendAck(QUdpSocket *socket, const QHostAddress &addr,
     if (!socket)
         return;
     const QByteArray frame = proto::makeAck(ackedType, txid, result);
-    socket->writeDatagram(frame, addr, port);
+    const qint64 written = socket->writeDatagram(frame, addr, port);
+    if (written != frame.size()) {
+        qWarning().noquote()
+            << QStringLiteral("[ACK] %1 回执发送失败 txid=%2 result=%3: %4")
+                   .arg(ackedType).arg(txid).arg(result)
+                   .arg(socket->errorString());
+    }
 }
 
 // ---------- 持久化 ----------
 
 void RobotManager::loadTeamMap()
 {
-    QSettings s(QStringLiteral("Scompetition"), QStringLiteral("RobotTeams"));
+    QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                QStringLiteral("Scompetition"), QStringLiteral("RobotTeams"));
     const QStringList keys = s.childKeys();
     for (const QString &k : keys) {
         bool ok = false;
@@ -284,7 +443,8 @@ void RobotManager::loadTeamMap()
 
 void RobotManager::saveTeamMap()
 {
-    QSettings s(QStringLiteral("Scompetition"), QStringLiteral("RobotTeams"));
+    QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                QStringLiteral("Scompetition"), QStringLiteral("RobotTeams"));
     s.clear();
     for (auto it = m_robotTeamMap.constBegin(); it != m_robotTeamMap.constEnd(); ++it)
         s.setValue(QString::number(it.key()), it.value());
@@ -292,7 +452,8 @@ void RobotManager::saveTeamMap()
 
 void RobotManager::loadProcessedTxids()
 {
-    QSettings s(QStringLiteral("Scompetition"), QStringLiteral("RobotTxids"));
+    QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                QStringLiteral("Scompetition"), QStringLiteral("RobotTxids"));
     const QStringList groups = s.childGroups();
     for (const QString &g : groups) {
         bool ok = false;
@@ -311,7 +472,8 @@ void RobotManager::loadProcessedTxids()
 
 void RobotManager::saveProcessedTxids()
 {
-    QSettings s(QStringLiteral("Scompetition"), QStringLiteral("RobotTxids"));
+    QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                QStringLiteral("Scompetition"), QStringLiteral("RobotTxids"));
     s.clear();
     for (auto it = m_processedTxids.constBegin(); it != m_processedTxids.constEnd(); ++it) {
         s.beginGroup(QString::number(it.key()));
