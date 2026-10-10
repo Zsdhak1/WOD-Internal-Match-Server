@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(Scompetition VERSION 0.2.0 LANGUAGES CXX)
 
+# The GitHub Windows runner uses an English locale. Keep source/resource paths
+# ASCII-safe and compile UTF-8 explicitly so regional settings cannot alter builds.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 # Development caches keep stable paths; exported artifacts carry a version and
 # UTC build-session timestamp. The build wrapper supplies one timestamp for the
 # configure/build/install/package sequence; manual configure creates a new one.
