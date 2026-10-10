@@ -575,6 +575,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # Windows redirected consoles may default to cp1252. Chinese status/help
+    # must not abort startup (including direct frozen EXE launches).
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
     parser = argparse.ArgumentParser(description='独立比赛结果网页（无需第三方依赖）')
     parser.add_argument('--host', default='127.0.0.1', help='默认仅本机；局域网可指定本机LAN IP或0.0.0.0')
     parser.add_argument('--port', type=int, default=8765)

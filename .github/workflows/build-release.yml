@@ -16,6 +16,9 @@ jobs:
   build-windows:
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       build_id: ${{ steps.metadata.outputs.build_id }}

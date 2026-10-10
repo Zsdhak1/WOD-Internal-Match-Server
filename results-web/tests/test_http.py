@@ -275,6 +275,10 @@ class CLISmokeTest(unittest.TestCase):
                 port=probe.getsockname()[1]
             env=os.environ.copy()
             env['RESULTS_ADMIN_PASSWORD']='Temporary-smoke-password-7'
+            # Reproduce English Windows CI's redirected cp1252 stdout even on
+            # a Chinese/UTF-8 developer machine; the service must self-correct.
+            env['PYTHONUTF8']='0'
+            env['PYTHONIOENCODING']='cp1252:strict'
             process=subprocess.Popen([sys.executable,str(ROOT/'server.py'),'--host','127.0.0.1','--port',str(port),
                                       '--db',str(Path(temp)/'cli.sqlite3')],env=env,stdin=subprocess.DEVNULL)
             try:
