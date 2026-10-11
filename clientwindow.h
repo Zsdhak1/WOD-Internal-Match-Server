@@ -13,6 +13,7 @@ class QCameraDevice;
 class QCameraFormat;
 class QCloseEvent;
 class QComboBox;
+class QGridLayout;
 class QJsonObject;
 class QLabel;
 class QLineEdit;
@@ -60,6 +61,7 @@ private slots:
 private:
     void buildUi();
     void applyClientUiScale();
+    void layoutRegistrationTiles();
     void buildRegistrationOverlay();
     void buildControlLayer();
     void showLoginPage();
@@ -126,6 +128,14 @@ private:
     int m_combatRemainingSeconds = -1;
 
     QWidget *m_registrationOverlay = nullptr;
+    QGridLayout *m_registrationTiles = nullptr;
+    QWidget *m_networkTile = nullptr;
+    QWidget *m_identityTile = nullptr;
+    QWidget *m_videoTile = nullptr;
+    QPushButton *m_redTeamTile = nullptr;
+    QPushButton *m_blueTeamTile = nullptr;
+    bool m_registrationCompact = false;
+    bool m_handlingClientResize = false;
     QWidget *m_controlLayer = nullptr;
     QWidget *m_controlPanel = nullptr;
     QToolButton *m_controlsButton = nullptr;

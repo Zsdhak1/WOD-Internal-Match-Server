@@ -242,7 +242,19 @@ target_link_libraries(FieldCameraTest PRIVATE Qt${QT_VERSION_MAJOR}::Core
 add_executable(CheckinModelTest tools/checkin_model_test.cpp checkinmodel.cpp checkinmodel.h)
 target_include_directories(CheckinModelTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(CheckinModelTest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+add_executable(ClientLoginUiTest
+    tools/client_login_ui_test.cpp
+    clientwindow.cpp clientwindow.h playercombatoverlay.cpp playercombatoverlay.h
+    broadcastwindow.cpp broadcastwindow.h huddigitslabel.h broadcast_assets.qrc
+    videocanvas.cpp videocanvas.h robotmanager.cpp robotmanager.h)
+target_include_directories(ClientLoginUiTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ClientLoginUiTest PRIVATE
+    Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 enable_testing()
+add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
+set_tests_properties(client_login_ui PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60 RUN_SERIAL TRUE)
 add_test(NAME checkin_model COMMAND CheckinModelTest)
 add_test(NAME field_camera COMMAND FieldCameraTest)
 add_test(NAME player_combat_overlay COMMAND PlayerCombatOverlayTest)

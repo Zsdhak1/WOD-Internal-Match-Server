@@ -16,6 +16,8 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QGridLayout>
+#include <QButtonGroup>
 #include <QHostAddress>
 #include <QIntValidator>
 #include <QJsonArray>
@@ -26,11 +28,15 @@
 #include <QMediaCaptureSession>
 #include <QMediaDevices>
 #include <QPlainTextEdit>
+#include <QPainter>
+#include <QLinearGradient>
+#include <QPolygonF>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScreen>
+#include <QScopedValueRollback>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStandardPaths>
@@ -47,6 +53,52 @@ namespace {
 constexpr int kRedTeam = 1;
 constexpr int kBlueTeam = 2;
 constexpr int kDefaultRobotId = 1;
+
+// Vector-only backdrop: crisp at any DPI, self-contained in every client
+// package, and only painted while the registration overlay is visible.
+class RegistrationBackdrop final : public QWidget
+{
+public:
+    explicit RegistrationBackdrop(QWidget *parent) : QWidget(parent)
+    {
+        setAttribute(Qt::WA_OpaquePaintEvent);
+    }
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.scale(width() / 1920.0, height() / 1080.0);
+        const QRectF canvas(0, 0, 1920, 1080);
+        QLinearGradient base(0, 0, 1920, 1080);
+        base.setColorAt(0, QColor(QStringLiteral("#102632")));
+        base.setColorAt(0.5, QColor(QStringLiteral("#111c29")));
+        base.setColorAt(1, QColor(QStringLiteral("#1e1b30")));
+        painter.fillRect(canvas, base);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(QStringLiteral("#123746")));
+        painter.drawPolygon(QPolygonF{QPointF(0,0), QPointF(650,0), QPointF(390,280), QPointF(0,280)});
+        painter.setBrush(QColor(QStringLiteral("#152d45")));
+        painter.drawPolygon(QPolygonF{QPointF(1540,0), QPointF(1920,0), QPointF(1920,710), QPointF(1750,710), QPointF(1750,230)});
+        painter.setBrush(QColor(QStringLiteral("#292539")));
+        painter.drawPolygon(QPolygonF{QPointF(1490,830), QPointF(1920,580), QPointF(1920,1080), QPointF(1180,1080)});
+        painter.setBrush(QColor(QStringLiteral("#152c32")));
+        painter.drawPolygon(QPolygonF{QPointF(0,760), QPointF(350,1080), QPointF(0,1080)});
+
+        // Low-contrast frame lines stay outside the 80%-width work area.
+        painter.setPen(QPen(QColor(100,169,190,30), 1));
+        for (int x : {64,128,1792,1856})
+            painter.drawLine(QPointF(x,0), QPointF(x,1080));
+        for (int y : {32,1048})
+            painter.drawLine(QPointF(0,y), QPointF(1920,y));
+        painter.setPen(Qt::NoPen);
+        painter.fillRect(QRectF(64,190,6,190), QColor(QStringLiteral("#087c91")));
+        painter.fillRect(QRectF(64,398,6,58), QColor(QStringLiteral("#2e5264")));
+        painter.fillRect(QRectF(1818,716,38,38), QColor(QStringLiteral("#1766ab")));
+        painter.fillRect(QRectF(1818,766,38,38), QColor(QStringLiteral("#873047")));
+        painter.fillRect(QRectF(1770,986,86,6), QColor(QStringLiteral("#177b62")));
+    }
+};
 
 QString teamText(int team)
 {
@@ -126,25 +178,38 @@ QString registrationStyleSheet(qreal scale)
 {
     const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
     return QStringLiteral(
-        "QWidget#registrationOverlay { background: rgba(3, 7, 11, 242); color: #f4f7fa; }"
-        "QFrame#registrationCard { background: rgba(10, 18, 27, 250); border: %1px solid #3d4d5a; border-radius: %2px; }"
-        "QLabel#registrationTitle { color: #f4f7fa; }"
-        "QLabel#registrationSubtitle { color: #9eabb5; }"
-        "QLabel#registrationPreview { background: #05080c; border: 1px solid #455661; color: #8d9aa4; }"
-        "QLineEdit, QComboBox { min-height: %3px; background: #111c26; border: 1px solid #536574; border-radius: %4px; padding: 0 %5px; color: #f4f7fa; }"
-        "QLineEdit:focus, QComboBox:focus { border-color: #72b4ff; }"
-        "QPushButton { min-height: %3px; background: #233746; border: 1px solid #5b7180; border-radius: %4px; padding: 0 %6px; color: #f4f7fa; }"
-        "QPushButton:hover { background: #2d4a5d; }"
-        "QPushButton:pressed { background: #1a2d3b; }"
-        "QPushButton#registerButton { background: #2f6d8e; border-color: #72b4ff; font-weight: 700; min-height: %7px; }"
-        "QLabel#registrationStatus { color: #d5e0e6; }")
-        .arg(px(2))
-        .arg(px(8))
-        .arg(px(34))
-        .arg(px(4))
-        .arg(px(9))
-        .arg(px(14))
-        .arg(px(42));
+        "QWidget#registrationOverlay { background: transparent; color: #ffffff; }"
+        "QFrame#registrationCard { background: transparent; border: none; }"
+        "QFrame#networkTile { background: #007f99; }"
+        "QFrame#identityTile { background: #24313f; }"
+        "QFrame#videoTile { background: #1d2834; }"
+        "QLabel { color: #ffffff; background: transparent; border: none; font-size: %10px; }"
+        "QLabel#registrationTitle { font-size: %1px; font-weight: 300; }"
+        "QLabel#registrationSubtitle { color: #aab8c7; }"
+        "QLabel[metroRole=eyebrow] { color: #aab8c7; font-size: %2px; letter-spacing: 2px; }"
+        "QLabel[metroRole=tileTitle] { font-size: %3px; font-weight: 600; }"
+        "QLabel[metroRole=hint] { color: #c8d9e3; }"
+        "QLabel#registrationPreview { background: #10161e; color: #9fb1c1; }"
+        "QLineEdit, QComboBox { font-size: %10px; min-height: %4px; background: #f4f7fa; border: 2px solid transparent; border-radius: 0; padding: 0 %5px; color: #142536; selection-background-color: #007f99; }"
+        "QLineEdit:focus, QComboBox:focus { border-color: #7de0ef; }"
+        "QComboBox::drop-down { border: none; width: %6px; }"
+        "QComboBox QAbstractItemView { background: #f4f7fa; color: #142536; selection-background-color: #007f99; selection-color: white; }"
+        "QPushButton { font-size: %10px; min-height: %4px; background: #364a5b; border: 2px solid transparent; border-radius: 0; padding: 0 %5px; color: #ffffff; }"
+        "QPushButton:hover { background: #486276; }"
+        "QPushButton:pressed { background: #253848; }"
+        "QPushButton:focus { border-color: #ffffff; }"
+        "QPushButton#redTeamTile { background: #b9364c; font-size: %3px; text-align: left; min-height: %9px; }"
+        "QPushButton#blueTeamTile { background: #1766ab; font-size: %3px; text-align: left; min-height: %9px; }"
+        "QPushButton#redTeamTile:hover { background: #d4465d; }"
+        "QPushButton#blueTeamTile:hover { background: #257dc5; }"
+        "QPushButton#redTeamTile:checked, QPushButton#blueTeamTile:checked { border: 3px solid white; }"
+        "QPushButton#registerButton { background: #16865e; font-weight: 600; font-size: %3px; min-height: %7px; text-align: left; padding-left: %8px; }"
+        "QPushButton#registerButton:hover { background: #1c9d70; }"
+        "QPushButton#registerButton:pressed { background: #116b4b; }"
+        "QPushButton:disabled, QPushButton#registerButton:disabled { background: #35434b; color: #9dabb4; }"
+        "QLabel#registrationStatus { color: #cbd7e2; min-height: %4px; }")
+        .arg(px(62)).arg(px(16)).arg(px(28)).arg(px(48))
+        .arg(px(18)).arg(px(32)).arg(px(88)).arg(px(28)).arg(px(122)).arg(px(20));
 }
 
 QString controlLayerStyleSheet(qreal scale)
@@ -263,9 +328,12 @@ void ClientWindow::buildRegistrationOverlay()
     if (!host)
         return;
 
-    m_registrationOverlay = new QWidget(host);
+    m_registrationOverlay = new RegistrationBackdrop(host);
     m_registrationOverlay->setObjectName(QStringLiteral("registrationOverlay"));
     m_registrationOverlay->setStyleSheet(registrationStyleSheet(1.0));
+    QFont loginFont(QStringLiteral("Microsoft YaHei UI"));
+    loginFont.setPixelSize(16);
+    m_registrationOverlay->setFont(loginFont);
 
     auto *root = new QVBoxLayout(m_registrationOverlay);
     root->setContentsMargins(24, 24, 24, 24);
@@ -275,9 +343,12 @@ void ClientWindow::buildRegistrationOverlay()
     registrationScroll->setFrameShape(QFrame::NoFrame);
     registrationScroll->setWidgetResizable(true);
     registrationScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    registrationScroll->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    registrationScroll->setObjectName(QStringLiteral("registrationScroll"));
+    registrationScroll->setStyleSheet(QStringLiteral("QScrollArea#registrationScroll { background: transparent; border: none; }"));
+    registrationScroll->viewport()->setAutoFillBackground(false);
     auto *registrationPage = new QWidget;
-    registrationPage->setStyleSheet(QStringLiteral("background: transparent;"));
+    registrationPage->setObjectName(QStringLiteral("registrationPage"));
+    registrationPage->setStyleSheet(QStringLiteral("QWidget#registrationPage { background: transparent; }"));
     auto *registrationPageLayout = new QVBoxLayout(registrationPage);
     registrationPageLayout->setContentsMargins(0, 0, 0, 0);
     registrationPageLayout->setSpacing(0);
@@ -285,25 +356,54 @@ void ClientWindow::buildRegistrationOverlay()
     auto *card = new QFrame(registrationPage);
     card->setObjectName(QStringLiteral("registrationCard"));
     card->setMinimumWidth(0);
-    card->setMaximumWidth(820);
+    card->setMaximumWidth(1320);
     card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     auto *cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(34, 30, 34, 30);
-    cardLayout->setSpacing(13);
+    cardLayout->setContentsMargins(0, 0, 0, 0);
+    cardLayout->setSpacing(16);
+
+    auto *eyebrow = new QLabel(QStringLiteral("SCOMPETITION  /  PLAYER TERMINAL"), card);
+    eyebrow->setProperty("metroRole", "eyebrow");
+    cardLayout->addWidget(eyebrow);
 
     auto *title = new QLabel(tr("赛事选手端"), card);
     title->setObjectName(QStringLiteral("registrationTitle"));
-    QFont titleFont = title->font();
-    titleFont.setBold(true);
-    titleFont.setPointSize(24);
-    title->setFont(titleFont);
     cardLayout->addWidget(title);
 
-    auto *subtitle = new QLabel(tr("登记完成后将进入与导播台一致的全屏比赛画面；视角固定为本机机器人。"),
+    auto *subtitle = new QLabel(tr("连接导播台 · 选择阵营 · 即刻进入赛场"),
                                 card);
     subtitle->setObjectName(QStringLiteral("registrationSubtitle"));
     subtitle->setWordWrap(true);
     cardLayout->addWidget(subtitle);
+
+    m_registrationTiles = new QGridLayout;
+    m_registrationTiles->setSpacing(16);
+    cardLayout->addLayout(m_registrationTiles, 1);
+    auto makeTile = [card](const QString &name, const QString &heading) {
+        auto *tile = new QFrame(card);
+        tile->setObjectName(name);
+        tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        auto *layout = new QVBoxLayout(tile);
+        layout->setContentsMargins(24, 22, 24, 22);
+        layout->setSpacing(12);
+        auto *label = new QLabel(heading, tile);
+        label->setProperty("metroRole", "tileTitle");
+        layout->addWidget(label);
+        return tile;
+    };
+    m_networkTile = makeTile(QStringLiteral("networkTile"), tr("01  /  连接导播台"));
+    m_identityTile = makeTile(QStringLiteral("identityTile"), tr("02  /  选择阵营"));
+    m_videoTile = makeTile(QStringLiteral("videoTile"), tr("03  /  视频源"));
+    auto *networkLayout = qobject_cast<QVBoxLayout *>(m_networkTile->layout());
+    auto *identityLayout = qobject_cast<QVBoxLayout *>(m_identityTile->layout());
+    auto *videoLayout = qobject_cast<QVBoxLayout *>(m_videoTile->layout());
+    m_registrationTiles->addWidget(m_networkTile, 0, 0);
+    m_registrationTiles->addWidget(m_identityTile, 1, 0);
+    m_registrationTiles->addWidget(m_videoTile, 0, 1, 2, 1);
+    m_registrationTiles->setColumnStretch(0, 1);
+    m_registrationTiles->setColumnStretch(1, 1);
+    m_registrationTiles->setRowStretch(0, 1);
+    m_registrationTiles->setRowStretch(1, 1);
 
     auto *networkForm = new QFormLayout;
     networkForm->setHorizontalSpacing(18);
@@ -323,16 +423,46 @@ void ClientWindow::buildRegistrationOverlay()
     m_registrationRobotLabel = new QLabel(card);
     networkForm->addRow(tr("服务器地址"), m_serverEdit);
     networkForm->addRow(tr("TCP 端口"), m_portEdit);
-    networkForm->addRow(tr("登记队伍"), m_teamEdit);
-    networkForm->addRow(tr("自动绑定"), m_registrationRobotLabel);
     networkForm->addRow(tr("选手端名称"), m_displayNameEdit);
-    cardLayout->addLayout(networkForm);
+    networkForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    networkForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    m_serverEdit->setObjectName(QStringLiteral("clientServerAddress"));
+    m_displayNameEdit->setObjectName(QStringLiteral("clientDisplayName"));
+    networkLayout->addLayout(networkForm);
+    auto *networkHint = new QLabel(tr("与导播台处于同一局域网，填写其 IP 地址。"), m_networkTile);
+    networkHint->setWordWrap(true);
+    networkHint->setProperty("metroRole", "hint");
+    networkLayout->addWidget(networkHint);
 
-    auto *sourceTitle = new QLabel(tr("机器人视频源（USB 或内置摄像头）"), card);
-    QFont sourceTitleFont = sourceTitle->font();
-    sourceTitleFont.setBold(true);
-    sourceTitle->setFont(sourceTitleFont);
-    cardLayout->addWidget(sourceTitle);
+    // Keep the protocol-facing combo as the single source of truth. Metro
+    // buttons only select its existing values; registration semantics stay intact.
+    m_teamEdit->hide();
+    auto *teamButtons = new QButtonGroup(this);
+    teamButtons->setExclusive(true);
+    auto *teams = new QHBoxLayout;
+    m_redTeamTile = new QPushButton(tr("红方\nRED TEAM"), m_identityTile);
+    m_blueTeamTile = new QPushButton(tr("蓝方\nBLUE TEAM"), m_identityTile);
+    m_redTeamTile->setObjectName(QStringLiteral("redTeamTile"));
+    m_blueTeamTile->setObjectName(QStringLiteral("blueTeamTile"));
+    for (auto *button : {m_redTeamTile, m_blueTeamTile}) {
+        button->setCheckable(true);
+        button->setMinimumHeight(100);
+        teamButtons->addButton(button);
+        teams->addWidget(button, 1);
+    }
+    connect(m_redTeamTile, &QPushButton::clicked, this, [this] { m_teamEdit->setCurrentIndex(0); });
+    connect(m_blueTeamTile, &QPushButton::clicked, this, [this] { m_teamEdit->setCurrentIndex(1); });
+    identityLayout->addLayout(teams);
+    identityLayout->addWidget(m_registrationRobotLabel);
+    auto *identityHint = new QLabel(tr("阵营选定，机器人编号自动绑定。"), m_identityTile);
+    identityHint->setProperty("metroRole", "hint");
+    identityHint->setWordWrap(true);
+    identityLayout->addWidget(identityHint);
+
+    auto *sourceTitle = new QLabel(tr("选择镜头，预览你的赛场视角。"), m_videoTile);
+    sourceTitle->setProperty("metroRole", "hint");
+    sourceTitle->setWordWrap(true);
+    videoLayout->addWidget(sourceTitle);
 
     auto *sourceLayout = new QVBoxLayout;
     sourceLayout->setSpacing(7);
@@ -354,20 +484,28 @@ void ClientWindow::buildRegistrationOverlay()
     sourceActions->addWidget(builtInButton, 1);
     sourceActions->addWidget(previewButton, 1);
     sourceLayout->addLayout(sourceActions);
-    cardLayout->addLayout(sourceLayout);
+    videoLayout->addLayout(sourceLayout);
 
     m_registrationPreview = new QLabel(card);
     m_registrationPreview->setObjectName(QStringLiteral("registrationPreview"));
     m_registrationPreview->setAlignment(Qt::AlignCenter);
     m_registrationPreview->setMinimumSize(280, 158);
-    m_registrationPreview->setMaximumSize(720, 405);
-    m_registrationPreview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_registrationPreview->setMaximumSize(QWIDGETSIZE_MAX, 405);
+    m_registrationPreview->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_registrationPreview->setText(tr("选择视频源后点击“预览”"));
-    cardLayout->addWidget(m_registrationPreview, 0, Qt::AlignHCenter);
+    videoLayout->addWidget(m_registrationPreview, 1);
 
-    m_loginButton = new QPushButton(tr("登记并进入全屏画面"), card);
+    m_loginButton = new QPushButton(tr("连接并进入比赛    →"), card);
     m_loginButton->setObjectName(QStringLiteral("registerButton"));
     connect(m_loginButton, &QPushButton::clicked, this, &ClientWindow::onLoginClicked);
+    connect(m_serverEdit, &QLineEdit::returnPressed, m_loginButton, &QPushButton::click);
+    connect(m_portEdit, &QLineEdit::returnPressed, m_loginButton, &QPushButton::click);
+    connect(m_displayNameEdit, &QLineEdit::returnPressed, m_loginButton, &QPushButton::click);
+    QWidget::setTabOrder(m_serverEdit, m_portEdit);
+    QWidget::setTabOrder(m_portEdit, m_displayNameEdit);
+    QWidget::setTabOrder(m_displayNameEdit, m_redTeamTile);
+    QWidget::setTabOrder(m_redTeamTile, m_blueTeamTile);
+    QWidget::setTabOrder(m_blueTeamTile, m_registrationSourceEdit);
     cardLayout->addWidget(m_loginButton);
 
     m_loginStatus = new QLabel(card);
@@ -521,7 +659,7 @@ void ClientWindow::showLoginPage()
     if (m_loginButton)
         m_loginButton->setEnabled(true);
     if (m_loginStatus)
-        m_loginStatus->setText(tr("请选择红方或蓝方并登记。"));
+        m_loginStatus->setText(tr("就绪 · 选择阵营，连接赛场。"));
     if (m_videoStatus)
         m_videoStatus->setText(tr("尚未登记视频源"));
     if (m_videoPreview) {
@@ -553,6 +691,9 @@ void ClientWindow::showLoginPage()
     if (m_registrationOverlay) {
         m_registrationOverlay->show();
         m_registrationOverlay->raise();
+        m_clientUiScale = -1.0; // Refresh login sizing after hidden HUD-only resizes.
+        applyClientUiScale();
+        layoutRegistrationTiles();
     }
 }
 
@@ -1206,6 +1347,12 @@ void ClientWindow::updateAutoRobotIdentity()
     const QString text = tr("%1 · %2 号步兵（自动）")
                              .arg(teamText(team))
                              .arg(m_selectedRobotId > 0 ? m_selectedRobotId : kDefaultRobotId);
+    if (m_redTeamTile && m_blueTeamTile) {
+        m_redTeamTile->setChecked(team == kRedTeam);
+        m_blueTeamTile->setChecked(team == kBlueTeam);
+        m_redTeamTile->setText(team == kRedTeam ? tr("红方 · 已选\nRED TEAM") : tr("红方\nRED TEAM"));
+        m_blueTeamTile->setText(team == kBlueTeam ? tr("蓝方 · 已选\nBLUE TEAM") : tr("蓝方\nBLUE TEAM"));
+    }
     if (m_registrationRobotLabel) {
         m_registrationRobotLabel->setText(text);
         styleLabel(m_registrationRobotLabel, teamColor(team), true);
@@ -1694,13 +1841,24 @@ void ClientWindow::closeEvent(QCloseEvent *event)
 
 void ClientWindow::resizeEvent(QResizeEvent *event)
 {
+    // Re-polishing scaled Qt styles can synchronously resize a hidden window
+    // again. Avoid recursive style application while its layouts are settling.
+    if (m_handlingClientResize)
+        return;
+    const QScopedValueRollback<bool> resizeGuard(m_handlingClientResize, true);
     BroadcastWindow::resizeEvent(event);
     applyClientUiScale();
     layoutCombatOverlay();
     // QMainWindow's central layout can settle after this resizeEvent. Align
     // the player overlay once more afterwards, rather than retaining the old
     // interactionLayer rectangle (and thus an off-center reticle).
-    QTimer::singleShot(0, this, [this] { layoutCombatOverlay(); });
+    QTimer::singleShot(0, this, [this] {
+        layoutCombatOverlay();
+        if (m_registrationOverlay && centralWidget() && m_registrationOverlay->isVisible()) {
+            m_registrationOverlay->setGeometry(centralWidget()->rect());
+            layoutRegistrationTiles();
+        }
+    });
     if (m_registrationOverlay && centralWidget()) {
         m_registrationOverlay->setGeometry(centralWidget()->rect());
         if (m_registrationOverlay->isVisible())
@@ -1710,6 +1868,8 @@ void ClientWindow::resizeEvent(QResizeEvent *event)
     const auto resizePreview = [this](QLabel *preview) {
         if (!preview || preview->width() <= 0)
             return;
+        if (preview == m_registrationPreview)
+            return; // The Metro video tile owns its available preview height.
         const int minHeight = qMax(1, qRound(158 * m_clientUiScale));
         const int height = qBound(minHeight, qRound(preview->width() * 9.0 / 16.0),
                                   preview->maximumHeight() > 0
@@ -1717,11 +1877,38 @@ void ClientWindow::resizeEvent(QResizeEvent *event)
                                       : qRound(405 * m_clientUiScale));
         preview->setFixedHeight(height);
     };
+    layoutRegistrationTiles();
     resizePreview(m_registrationPreview);
     resizePreview(m_videoPreview);
     if (m_lastVideoFrame.isNull())
         return;
     showFramePreview(m_lastVideoFrame);
+}
+
+void ClientWindow::layoutRegistrationTiles()
+{
+    if (!m_registrationTiles || !m_registrationOverlay || !m_registrationOverlay->isVisible())
+        return;
+    if (auto *card = m_registrationOverlay->findChild<QFrame *>(QStringLiteral("registrationCard"))) {
+        const int width = m_registrationOverlay->width();
+        const int targetWidth = width < 900 ? qMax(1, width - 64) : qRound(width * 0.8);
+        // Occupy roughly 80% of the viewport, rather than capping the login
+        // workspace at a small fixed card on large displays.
+        card->setMinimumWidth(0);
+        card->setMaximumWidth(targetWidth);
+        card->setMinimumWidth(targetWidth);
+        card->setMinimumHeight(width < 900 ? 0 : qRound(m_registrationOverlay->height() * 0.8));
+    }
+    const bool compact = m_registrationOverlay->width() < 900;
+    if (compact == m_registrationCompact)
+        return;
+    m_registrationCompact = compact;
+    for (auto *tile : {m_networkTile, m_identityTile, m_videoTile})
+        m_registrationTiles->removeWidget(tile);
+    m_registrationTiles->setColumnStretch(1, compact ? 0 : 1);
+    m_registrationTiles->addWidget(m_networkTile, 0, 0);
+    m_registrationTiles->addWidget(m_identityTile, 1, 0);
+    m_registrationTiles->addWidget(m_videoTile, compact ? 2 : 0, compact ? 0 : 1, compact ? 1 : 2, 1);
 }
 
 void ClientWindow::applyClientUiScale()
@@ -1732,24 +1919,35 @@ void ClientWindow::applyClientUiScale()
     m_clientUiScale = scale;
 
     const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
-    if (m_registrationOverlay) {
-        m_registrationOverlay->setStyleSheet(registrationStyleSheet(scale));
+    const qreal loginScale = qMax(0.70, scale);
+    const auto loginPx = [loginScale](int value) { return qMax(1, qRound(value * loginScale)); };
+    if (m_registrationOverlay && m_registrationOverlay->isVisible()) {
+        m_registrationOverlay->setStyleSheet(registrationStyleSheet(loginScale));
         if (QLayout *root = m_registrationOverlay->layout())
             root->setContentsMargins(px(24), px(24), px(24), px(24));
         if (QFrame *card = m_registrationOverlay->findChild<QFrame *>(
                 QStringLiteral("registrationCard"))) {
-            card->setMaximumWidth(px(820));
+            if (card->layout())
+                card->layout()->setSpacing(loginPx(18));
         }
-        if (QLabel *title = m_registrationOverlay->findChild<QLabel *>(
-                QStringLiteral("registrationTitle"))) {
-            QFont font = title->font();
-            font.setPointSizeF(qMax(1.0, 24.0 * scale));
-            title->setFont(font);
+        // The HUD may shrink further, but login controls must remain legible.
+        QFont font = m_registrationOverlay->font();
+        font.setPixelSize(loginPx(20));
+        m_registrationOverlay->setFont(font);
+        if (m_registrationTiles)
+            m_registrationTiles->setSpacing(px(16));
+        for (auto *tile : {m_networkTile, m_identityTile, m_videoTile}) {
+            if (tile && tile->layout()) {
+                tile->layout()->setContentsMargins(loginPx(28), loginPx(24), loginPx(28), loginPx(24));
+                tile->layout()->setSpacing(loginPx(14));
+            }
         }
+        if (m_redTeamTile) m_redTeamTile->setMinimumHeight(loginPx(100));
+        if (m_blueTeamTile) m_blueTeamTile->setMinimumHeight(loginPx(100));
     }
-    if (m_registrationPreview) {
-        m_registrationPreview->setMinimumSize(px(280), px(158));
-        m_registrationPreview->setMaximumSize(px(720), px(405));
+    if (m_registrationPreview && m_registrationOverlay->isVisible()) {
+        m_registrationPreview->setMinimumSize(loginPx(280), loginPx(158));
+        m_registrationPreview->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
     }
     if (m_controlLayer) {
         m_controlLayer->setStyleSheet(controlLayerStyleSheet(scale));
