@@ -35,7 +35,7 @@ public:
     quint32 sendAssignment(quint32 ipv4, quint8 robotId,
                            const QByteArray &deviceMac6,
                            const QByteArray &controllerMac6);
-    quint32 sendStatusRequest(quint8 targetId);   // 无 ACK
+    bool sendStatusRequest(quint8 targetId);   // 无 ACK；true 仅表示数据报已发送
 
     // 由 RobotManager 在收到 ESP32 ACK 时调用
     void onAck(quint8 ackedType, quint32 txid, quint8 result, quint8 robotId);

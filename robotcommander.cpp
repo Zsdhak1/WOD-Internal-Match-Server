@@ -147,7 +147,8 @@ quint32 RobotCommander::sendCommandTo(quint8 type, quint8 targetId, quint32 ipv4
                         .arg(address.toString())
                         .arg(port)
                         .arg(txid));
-    return txid;
+    // No-ACK requests return only a send-success flag, not a transaction ID.
+    return needsAck ? txid : 1u;
 }
 
 quint32 RobotCommander::sendGameStart(quint8 targetId)
@@ -210,7 +211,7 @@ quint32 RobotCommander::sendAssignment(quint32 ipv4, quint8 robotId,
                          true);
 }
 
-quint32 RobotCommander::sendStatusRequest(quint8 targetId)
+bool RobotCommander::sendStatusRequest(quint8 targetId)
 {
     // STATUS_REQUEST 不需要 ACK，但用统一 sendCommand 路径（needsAck=false）
     return sendCommand(proto::TypeStatusRequest, targetId,

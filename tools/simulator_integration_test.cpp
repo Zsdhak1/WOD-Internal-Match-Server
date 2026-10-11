@@ -27,6 +27,9 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabWidget>
+#include <QTabBar>
+#include <QAbstractButton>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUdpSocket>
@@ -502,6 +505,7 @@ int main(int argc,char **argv)
             check(!child<QLabel>(server,"fieldCameraThumbnail")->pixmap().isNull(), "Local thumbnail missing");
             for (auto *button : server.findChildren<QPushButton *>("fieldCameraTake")) button->click();
             check(child<QComboBox>(server,"programSource")->currentData().toString()==QStringLiteral("field"), "Take field failed");
+            check(!child<QLabel>(server,"serverProgramMonitor")->pixmap().isNull(), "Central program monitor missing live camera frame");
             invoke(server,"onResetMatch");
             check(camera->live(), "Match reset stopped independent camera");
             auto *inspector = static_cast<CheckinPanel *>(child<QWidget>(server,"checkinPanel"));
@@ -552,6 +556,58 @@ int main(int argc,char **argv)
                   "Camera stop failed to release/clear");
             qInfo()<<"PASS: server independent USB field source, device identity, thumbnail, take, match independence and signal loss";
         }
+        {
+            auto *tabs = child<QTabWidget>(server, "serverControlTabs");
+            auto *left = child<QTabWidget>(server,"serverLeftSidebar");
+            auto *right = child<QTabWidget>(server,"serverRightSidebar");
+            auto *compact = child<QTabWidget>(server,"serverCompactWorkspace");
+            check(left->count()==1 && tabs->count()==2 && right->count()==1,"Dashboard tools missing");
+            check(server.findChild<QWidget *>(QStringLiteral("serverBottomDock")) == nullptr,
+                  "Legacy bottom log dock is still present");
+            check(child<QWidget>(server, "serverRightOperationsPage")
+                      ->findChild<QWidget *>(QStringLiteral("serverEventLog")) != nullptr,
+                  "Event log was not moved into the right sidebar page");
+            auto *feedback = child<QLabel>(server, "serverActionStatus");
+            for (const QSize size : {QSize(1920,1080), QSize(2560,1440), QSize(1600,900), QSize(1280,720), QSize(1024,768), QSize(800,600), QSize(800,900)}) {
+                server.resize(size); server.show(); settle(100);
+                check(server.width() <= size.width() && server.height() <= size.height(), QStringLiteral("Dashboard exceeds requested viewport %1x%2 actual %3x%4").arg(size.width()).arg(size.height()).arg(server.width()).arg(server.height()));
+                const bool isCompact = size.width()<1500 || size.height()<850;
+                check(compact->isVisible()==isCompact,"Wrong dashboard breakpoint");
+                if (!isCompact)
+                    check(left->isVisible() && tabs->isVisible() && right->isVisible(),"Three dashboard columns not simultaneously visible");
+                for (auto *pane : {left,tabs,right}) {
+                    if (isCompact) compact->setCurrentWidget(pane);
+                    for (int page=0;page<pane->count();++page) {
+                        pane->setCurrentIndex(page); settle(40);
+                        auto *workspace=pane->currentWidget();
+                        const QRect bounds(QPoint(0,0),workspace->size());
+                        for (auto *button : workspace->findChildren<QAbstractButton *>()) {
+                            if (!button->isVisible() || button->width()==0) continue;
+                            const QRect rect(button->mapTo(workspace,QPoint(0,0)),button->size());
+                            check(bounds.contains(rect),QStringLiteral("Dashboard clipped %1 in %2 page %3 at %4x%5 rect %6,%7 %8x%9 bounds %10x%11")
+                                .arg(button->text(),pane->objectName()).arg(page).arg(size.width()).arg(size.height()).arg(rect.x()).arg(rect.y()).arg(rect.width()).arg(rect.height()).arg(bounds.width()).arg(bounds.height()));
+                        }
+                    }
+                    pane->setCurrentIndex(0);
+                }
+                if (isCompact) compact->setCurrentWidget(right);
+                right->setCurrentIndex(0);
+                settle();
+                check(feedback->isVisible(),"Header action result hidden");
+                check(child<QPlainTextEdit>(server,"serverLog")->isVisible(),"Right sidebar log hidden");
+                check(child<QWidget>(server,"serverEventLog")->isVisible(),"Right sidebar log panel hidden");
+                if (isCompact) compact->setCurrentWidget(tabs);
+                check(server.grab().save(outDir+QStringLiteral("/server-dashboard-%1x%2.png").arg(size.width()).arg(size.height())),"Cannot save dashboard");
+            }
+            invoke(server,"onForcePowerOn");
+            check(feedback->property("state").toString()==QStringLiteral("error"), "Missing endpoint not shown as failure");
+            invoke(server,"onAssignTeam");
+            check(feedback->property("state").toString()==QStringLiteral("error"), "Assignment validation lacks visible error");
+            invoke(server,"onResetMatch");
+            check(feedback->property("state").toString()==QStringLiteral("success"), "Match reset lacks visible success");
+            tabs->setCurrentIndex(0); server.resize(1280,720); settle();
+            qInfo()<<"PASS: full-screen three-column dashboard, compact fallback and all tool pages at seven sizes; right-sidebar log and header result visible";
+        }
         qInfo() << "Server ready";
         auto *manager=server.findChild<RobotManager *>();
         auto *commander=server.findChild<RobotCommander *>();
@@ -562,6 +618,36 @@ int main(int argc,char **argv)
         const quint16 port=reserve.localPort(); reserve.close();
         child<QSpinBox>(server,"serverUdpPort")->setValue(port); invoke(server,"onToggleListen");
         check(socket->state()==QAbstractSocket::BoundState,"Server bind failed");
+        {
+            auto *feedback=child<QLabel>(server,"serverActionStatus");
+            commander->learnEndpoint(250,QHostAddress(QStringLiteral("127.0.0.9")).toIPv4Address(),proto::kDownlinkPort);
+            commander->learnEndpoint(251,QHostAddress(QStringLiteral("127.0.0.10")).toIPv4Address(),proto::kDownlinkPort);
+            const auto lastTx=[] {
+                QSettings settings(QSettings::defaultFormat(),QSettings::UserScope,QStringLiteral("Scompetition"),QStringLiteral("RobotCommands"));
+                return settings.value(QStringLiteral("lastTxid")).toUInt();
+            };
+            child<QSpinBox>(server,"deviceRobotId")->setValue(250);
+            invoke(server,"onForcePowerOn"); const quint32 first=lastTx();
+            check(feedback->property("state").toString()==QStringLiteral("pending"),"Sent command not pending");
+            child<QSpinBox>(server,"deviceRobotId")->setValue(251);
+            invoke(server,"onForcePowerOn"); const quint32 second=lastTx();
+            commander->onAck(proto::TypeForcePowerOn,first,0,250);
+            check(feedback->property("state").toString()==QStringLiteral("pending"),"Partial ACK marked batch success");
+            waitFor([&]{return commander->pendingCount()==0;},"Command timeout missing");
+            check(feedback->property("state").toString()==QStringLiteral("error") && feedback->text().contains(QStringLiteral("超时")),"Timeout not visibly reported");
+            invoke(server,"onForcePowerOn"); const quint32 rejected=lastTx();
+            commander->onAck(proto::TypeForcePowerOn,rejected,2,251);
+            check(feedback->property("state").toString()==QStringLiteral("error"),"Rejected command shown as success");
+            invoke(server,"onForcePowerOn"); const quint32 successful=lastTx();
+            commander->onAck(proto::TypeForcePowerOn,successful,0,251);
+            check(feedback->property("state").toString()==QStringLiteral("success"),"ACK success not reported");
+            invoke(server,"onRequestStatus");
+            check(commander->pendingCount()==0 && feedback->property("state").toString()==QStringLiteral("info"),"No-ACK status request incorrectly failed or queued");
+            Q_UNUSED(second);
+            commander->forgetEndpoint(250); commander->forgetEndpoint(251);
+            child<QSpinBox>(server,"deviceRobotId")->setValue(1);
+            qInfo()<<"PASS: command pending, partial ACK, timeout, rejection, success and no-ACK request feedback";
+        }
         SimulatorWindow red,blue;
         configureSimulator(red,QStringLiteral("127.0.0.2"),port);
         configureSimulator(blue,QStringLiteral("127.0.0.3"),port);
@@ -575,12 +661,33 @@ int main(int argc,char **argv)
               && child<QSpinBox>(server,"deviceRobotId")->value()==71,"Announce overwrote assignment form");
         assign(server,red,71,1);
         check(manager->teamForRobot(71)==0,"Team changed before ACK");
+        check(child<QLabel>(server,"serverActionStatus")->property("state").toString()==QStringLiteral("pending"), "Assignment was marked successful before ACK");
         waitFor([&]{return manager->teamForRobot(71)==1 && rowFor(*table,71)>=0;},"Red assignment failed");
         assign(server,blue,72,2);
         waitFor([&]{return manager->teamForRobot(72)==2 && rowFor(*table,72)>=0;},"Blue assignment failed");
         check(child<QSpinBox>(red,"simRobotId")->value()==71 && child<QSpinBox>(blue,"simRobotId")->value()==72,"Assignment applied wrong ID");
         waitFor([&]{return commander->pendingCount()==0;},"Assignment ACK did not close transaction");
         qInfo()<<"PASS: two-device discovery, form editing, assignment ACK and red/blue mapping";
+        {
+            server.resize(1920,1080); settle();
+            auto *compact=child<QTabWidget>(server,"serverCompactWorkspace");
+            auto *left=child<QTabWidget>(server,"serverLeftSidebar");
+            auto *center=child<QTabWidget>(server,"serverControlTabs");
+            auto *right=child<QTabWidget>(server,"serverRightSidebar");
+            if (compact->isVisible()) compact->setCurrentWidget(center);
+            left->setCurrentIndex(0); center->setCurrentIndex(0); right->setCurrentIndex(0);
+            child<QComboBox>(server,"fieldCameraDevice")->setCurrentIndex(child<QComboBox>(server,"fieldCameraDevice")->findData(QByteArray("usb-B")));
+            invoke(server,"onToggleFieldCamera");
+            QImage liveFrame(1280,720,QImage::Format_RGB32); liveFrame.fill(QColor("#265c42"));
+            fieldBackend->push(liveFrame);
+            for (auto *button : server.findChildren<QPushButton *>("fieldCameraTake")) button->click();
+            table->setCurrentCell(rowFor(*table,71),0); table->selectRow(rowFor(*table,71));
+            settle();
+            check(server.grab().save(outDir+QStringLiteral("/server-dashboard-live-1920x1080.png")),"Cannot save populated dashboard");
+            left->setCurrentIndex(0); settle();
+            check(server.grab().save(outDir+QStringLiteral("/server-dashboard-teams-1920x1080.png")),"Cannot save team sidebar");
+            invoke(server,"onToggleFieldCamera");
+        }
 
         QHash<quint32,int> acks;
         QObject ackObserver;

@@ -28,6 +28,9 @@ int main(int argc, char *argv[])
                    available.y() + qMax(0, (available.height() - size.height()) / 2));
         }
     }
-    w.show();
+    // Production is a fullscreen operator console; explicit QA dimensions
+    // retain a normal window so automated geometry checks stay deterministic.
+    if (qEnvironmentVariableIsSet("SCOMP_MAIN_SIZE")) w.show();
+    else w.showFullScreen();
     return a.exec();
 }

@@ -12,6 +12,7 @@ class FieldCamera;
 class FieldCameraBackend;
 class QCheckBox;
 class QGroupBox;
+class QGridLayout;
 class QHBoxLayout;
 class QUdpSocket;
 class RobotCommander;
@@ -28,6 +29,7 @@ class QResizeEvent;
 class QSplitter;
 class QSpinBox;
 class QTableWidget;
+class QTabWidget;
 class QTimer;
 class ResponsiveUiScaler;
 
@@ -107,6 +109,16 @@ private:
     };
     QHash<quint32, PendingAssignment> m_pendingAssignments;
     void buildUi();
+    void showActionResult(const QString &message, const QString &state = QStringLiteral("success"));
+    void trackCommand(quint32 txid, const QString &action);
+    void reportAction(const QString &message, const QString &state = QStringLiteral("success"));
+    QHash<quint32, QString> m_actionCommands;
+    int m_commandTotal = 0;
+    int m_commandConfirmed = 0;
+    int m_commandFailed = 0;
+    bool m_collectingCommandBatch = false;
+    void finishCommand(quint32 txid, const QString &detail, bool success);
+    QLabel *m_cardTargetLabel = nullptr;
     void loadRefereeRules();
     void applyVerdict();
     void sendGameCommand(bool start);
@@ -140,6 +152,14 @@ private:
     MatchServer    *m_matchServer = nullptr;
 
     QLabel         *m_connLabel = nullptr;
+    QLabel         *m_actionStatusLabel = nullptr;
+    QTabWidget     *m_controlTabs = nullptr;
+    QTabWidget     *m_leftTabs = nullptr;
+    QTabWidget     *m_rightTabs = nullptr;
+    QTabWidget     *m_compactTabs = nullptr;
+    QLabel         *m_programMonitor = nullptr;
+    QLabel         *m_matchOverview = nullptr;
+    bool            m_dashboardCompact = false;
     QTableWidget   *m_table     = nullptr;
     QPlainTextEdit *m_log       = nullptr;
     QComboBox      *m_screenEdit = nullptr;
@@ -186,12 +206,10 @@ private:
     QPushButton    *m_loadLayoutBtn = nullptr;
     QTimer         *m_autoSwitchTimer = nullptr;
     QSplitter      *m_workspace = nullptr;
-    QSplitter      *m_statusSplitter = nullptr;
     ResponsiveUiScaler *m_uiScaler = nullptr;
     qreal           m_controlUiScale = 1.0;
-    Qt::Orientation m_workspaceOrientation = Qt::Horizontal;
     QGroupBox      *m_sourcePreviewGroup = nullptr;
-    QHBoxLayout    *m_sourcePreviewLayout = nullptr;
+    QGridLayout    *m_sourcePreviewLayout = nullptr;
     // sourceId -> preview QLabel. Rebuilt whenever the source list changes.
     QHash<QString, QLabel *> m_sourcePreviewViews;
     // V2 设备管理
