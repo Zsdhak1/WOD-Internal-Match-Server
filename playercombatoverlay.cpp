@@ -126,6 +126,11 @@ void PlayerCombatOverlay::paintEvent(QPaintEvent *)
 
     painter.translate(width() / 2.0, height() / 2.0);
     painter.scale(m_scale, m_scale);
+    // Cooling arcs, ammunition budget, reticle and hit marker share one uniform
+    // enlargement of their original geometry.
+    constexpr qreal kCombatUiScale = 2.0;
+    painter.save();
+    painter.scale(kCombatUiScale, kCombatUiScale);
     // Open side arcs keep the centre and diagonal hit marker unobstructed.
     const bool heatValid = m_heat.valid(now);
     const int shots = m_heat.availableShots(now);
@@ -146,7 +151,7 @@ void PlayerCombatOverlay::paintEvent(QPaintEvent *)
     drawArc(120, 120, QColor(202, 221, 229, 60), 2.0);
     drawArc(60, -120, QColor(202, 221, 229, 60), 2.0);
     if (heatValid) {
-            drawArc(240, -120.0 * shots / maxShots, ammoColor, 2.4);
+        drawArc(240, -120.0 * shots / maxShots, ammoColor, 2.4);
         drawArc(60, -120.0 * m_heat.coolingProgress(now), ready, 2.4);
     }
     const QString budget = heatValid ? QStringLiteral("%1/%2").arg(shots).arg(maxShots)
@@ -154,7 +159,9 @@ void PlayerCombatOverlay::paintEvent(QPaintEvent *)
     const qreal glyphW = 6.4;
     const qreal advance = 8.0;
     const qreal totalW = budget.size() * advance - 1.6;
-    const qreal numberLeft = -91.0 + 48.0 - totalW;
+    // Keep the budget number clear of the left arc; kCombatUiScale scales it too.
+    constexpr qreal kBudgetNumberOffset = -5.0;
+    const qreal numberLeft = -91.0 + 48.0 - totalW + kBudgetNumberOffset;
     const auto drawBudgetGlyph = [&](QChar c, qreal x) {
         static constexpr unsigned masks[] = {0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07,0x7f,0x6f};
         if (c == QLatin1Char('/')) {
@@ -222,4 +229,5 @@ void PlayerCombatOverlay::paintEvent(QPaintEvent *)
         };
         painter.drawLines(marker, 4);
     }
+    painter.restore(); // The 2x combat UI scale ends here.
 }
