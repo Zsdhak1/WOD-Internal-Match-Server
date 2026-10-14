@@ -34,6 +34,7 @@ public:
 
     bool start(quint16 port);
     void stop();
+    void clearRegistrations(const QString &reason);
     bool isListening() const;
     quint16 port() const { return m_port; }
     quint16 videoPort(quint8 team) const;

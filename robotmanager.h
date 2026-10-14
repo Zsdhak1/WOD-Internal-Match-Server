@@ -95,6 +95,13 @@ signals:
                                const QHostAddress &addr, quint16 port);
     // V2：收到 ESP32 的 ACK
     void ackReceived(quint8 ackedType, quint32 txid, quint8 result, quint8 robotId);
+    // ACK has no robot ID. Forward the actual source, not a guessed/default ID.
+    void ackReceivedFrom(quint8 ackedType, quint32 txid, quint8 result,
+                         const QHostAddress &addr, quint16 port);
+    // Every repeat is delivered: business persistence decides whether to resend
+    // an existing decision. Never merge this with death/revive deduplication.
+    void reviveRequested(quint8 robotId, quint8 sequence, quint32 requestTx,
+                         quint32 sourceIPv4, quint16 sourcePort);
     // V2：学习到的 ESP32 端点，供下行命令使用
     void endpointLearned(quint8 robotId, quint32 ipv4, quint16 port);
     void endpointForgotten(quint8 robotId);

@@ -26,6 +26,7 @@
 #include <QSpinBox>
 #include <QTimer>
 #include <QUdpSocket>
+#include <QVariant>
 #include <QVBoxLayout>
 
 namespace {
@@ -36,6 +37,7 @@ constexpr int kAnnounceIntervalMs = 2000;
 constexpr int kDemoIntervalMs = 1800;
 constexpr int kReliableRetryMs = 100;
 constexpr int kMaxReliableAttempts = 3;
+constexpr qint64 kDeathDelayMs = 5000;
 }
 
 SimulatorWindow::SimulatorWindow(QWidget *parent)
@@ -137,6 +139,9 @@ void SimulatorWindow::buildUi()
         m_robotIdEdit->setValue(v2 ? m_assignedId : qMax(1, m_robotIdEdit->value()));
         m_formalMode = false;
         m_roundEnded = false;
+        clearReviveRequest();
+        m_completedApprovals.clear();
+        saveReviveState();
         m_hpEdit->setMaximum(v2 ? kPreparationHp : 5000);
         m_hpEdit->setValue(v2 ? kPreparationHp : 5000);
         m_teamEdit->setCurrentIndex(v2 ? 0 : 1);
@@ -304,6 +309,7 @@ void SimulatorWindow::loadDeviceIdentity()
     m_completedCommandOrder.clear();
     // Avoid reusing the server's persisted reliable-event transaction IDs.
     m_nextTxid = QRandomGenerator::global()->generate() | 1u;
+    loadReviveState();
 }
 
 bool SimulatorWindow::saveDeviceAssignment(quint8 id, const QByteArray &controller)
@@ -318,12 +324,20 @@ bool SimulatorWindow::saveDeviceAssignment(quint8 id, const QByteArray &controll
         appendLog(tr("分配失败：无法保存模拟设备身份"));
         return false;
     }
-    if (m_assignedId != id)
+    if (m_assignedId != id) {
         m_pendingEvents.clear();
+        clearReviveRequest();
+        m_completedApprovals.clear();
+        // Identity reassignment is not GAME_START: preserve the L431-like
+        // preparation/formal/ended/card state, but never carry an old-ID request.
+        if (!m_aliveEdit->isChecked() && !m_roundEnded && m_yellowCards < 3)
+            m_deathDeadlineMs = protocolNowMs() + kDeathDelayMs;
+    }
     m_assignedId = id;
     m_controllerMac = controller;
     m_robotIdEdit->setValue(id);
     m_controllerMacDisplay->setText(QString::fromLatin1(controller.toHex(':').toUpper()));
+    if (!saveReviveState()) return false;
     setRunningUi(m_running);
     return true;
 }
@@ -394,7 +408,7 @@ void SimulatorWindow::queueReliableEvent(quint8 type)
     ev.type = type;
     ev.txid = txid;
     ev.attempts = 1;
-    ev.deadlineMs = QDateTime::currentMSecsSinceEpoch() + kReliableRetryMs;
+    ev.deadlineMs = protocolNowMs() + kReliableRetryMs;
     ev.datagram = reliableEventFrameV2(type, txid);
     m_pendingEvents.insert(txid, ev);
     sendDatagram(ev.datagram,
@@ -485,6 +499,13 @@ void SimulatorWindow::sendStatus()
 {
     if (!canSendEvents())
         return;
+    // State widgets are telemetry controls, not a way around formal approval.
+    if (protocolVersion() == proto::kVersion2 && m_formalMode
+        && (m_deathDeadlineMs >= 0 || !m_reviveRequest.isEmpty())) {
+        m_hpEdit->setValue(0);
+        m_aliveEdit->setChecked(false);
+        m_shootEdit->setChecked(false);
+    }
     const QString addressText = m_serverEdit->text().trimmed();
     QHostAddress address(addressText);
     if (address.isNull()) {
@@ -549,23 +570,27 @@ void SimulatorWindow::onSendHit()
 
 void SimulatorWindow::onSendDeath()
 {
-    if (!canSendEvents()) return;
+    if (!canSendEvents() || m_roundEnded) return;
+    const bool wasAlive = m_aliveEdit->isChecked();
     m_hpEdit->setValue(0);
     m_aliveEdit->setChecked(false);
     m_shootEdit->setChecked(false);
-    if (protocolVersion() == proto::kVersion1)
+    if (protocolVersion() == proto::kVersion1) {
         sendDatagram(eventFrameV1(proto::TypeDeath), tr("死亡"));
-    else
-        queueReliableEvent(proto::TypeDeath);
-    if (m_running)
-        sendStatus();
+    } else {
+        // Repeated manual death must not replace an outstanding request/clock.
+        if (m_deathDeadlineMs < 0 && m_reviveRequest.isEmpty()) {
+            m_deathDeadlineMs = protocolNowMs() + kDeathDelayMs;
+            saveReviveState();
+        }
+        if (wasAlive) queueReliableEvent(proto::TypeDeath);
+    }
+    sendStatus();
 }
 
-void SimulatorWindow::onSendRevive()
+void SimulatorWindow::executeRevive()
 {
-    if (!canSendEvents() || m_roundEnded
-        || (protocolVersion() == proto::kVersion2 && m_yellowCards >= 3))
-        return;
+    clearReviveRequest();
     m_aliveEdit->setChecked(true);
     m_shootEdit->setChecked(true);
     m_hpEdit->setValue(m_hpEdit->maximum());
@@ -573,13 +598,33 @@ void SimulatorWindow::onSendRevive()
         sendDatagram(eventFrameV1(proto::TypeRevive), tr("复活"));
     else
         queueReliableEvent(proto::TypeRevive);
-    if (m_running)
-        sendStatus();
+    sendStatus();
+}
+
+void SimulatorWindow::onSendRevive()
+{
+    if (!canSendEvents() || m_roundEnded
+        || (protocolVersion() == proto::kVersion2 && m_yellowCards >= 3))
+        return;
+    if (protocolVersion() == proto::kVersion2 && m_formalMode) {
+        if (m_aliveEdit->isChecked()) return;
+        if (m_deathDeadlineMs < 0 && m_reviveRequest.isEmpty()) {
+            m_deathDeadlineMs = protocolNowMs() + kDeathDelayMs;
+            saveReviveState();
+        }
+        advanceReviveState();
+        appendLog(tr("正式模式：等待死亡满5秒发送申请，以及服务器批准；保持HP=0"));
+        return;
+    }
+    executeRevive(); // Legacy V1/manual preparation behaviour is retained.
+    saveReviveState();
 }
 
 void SimulatorWindow::onSendShootEnabled()
 {
-    if (!canSendEvents()) return;
+    if (!canSendEvents() || (protocolVersion() == proto::kVersion2
+        && (m_roundEnded || !m_aliveEdit->isChecked()
+            || m_deathDeadlineMs >= 0 || !m_reviveRequest.isEmpty()))) return;
     m_shootEdit->setChecked(true);
     if (protocolVersion() == proto::kVersion1)
         sendDatagram(eventFrameV1(proto::TypeShootEnabled), tr("允许射击"));
@@ -695,6 +740,10 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
         sendAck(addr, port, type, txid, 2);
         return;
     }
+    if (type == proto::TypeReviveApprove) {
+        handleReviveApproval(frame.requestSequence, txid, addr, port);
+        return;
+    }
     const quint64 key = (quint64(type) << 32) | txid;
     const auto completed = m_completedCommands.constFind(key);
     if (completed != m_completedCommands.constEnd()) {
@@ -714,6 +763,9 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
         }
         break;
     case proto::TypeGameStart:
+        clearReviveRequest();
+        m_completedApprovals.clear();
+        m_pendingEvents.clear(); // No old-epoch death/revive uplinks.
         m_formalMode = true;
         m_roundEnded = false;
         m_yellowCards = 0;
@@ -723,6 +775,8 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
         m_shootEdit->setChecked(true);
         break;
     case proto::TypeGameEnd:
+        clearReviveRequest();
+        m_completedApprovals.clear();
         m_roundEnded = true;
         m_shootEdit->setChecked(false);
         sendDatagram(eventFrameV2(proto::TypeShootDisabled), tr("禁止射击"));
@@ -731,9 +785,14 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
     case proto::TypeSetHp:
         if (frame.hp > m_hpEdit->maximum()) {
             result = 2;
-        } else if (m_yellowCards >= 3 && frame.hp > 0) {
+        } else if (frame.hp > 0 && (m_yellowCards >= 3 || m_roundEnded
+                   || (m_formalMode && (!m_aliveEdit->isChecked()
+                       || m_deathDeadlineMs >= 0 || !m_reviveRequest.isEmpty())))) {
             result = 1;
         } else {
+            if (!frame.hp && m_aliveEdit->isChecked() && !m_roundEnded)
+                onSendDeath();
+            if (frame.hp > 0) clearReviveRequest(); // Preparation SET_HP can restore life.
             m_hpEdit->setValue(frame.hp);
             m_aliveEdit->setChecked(frame.hp != 0);
             m_shootEdit->setChecked(frame.hp != 0 && !m_roundEnded);
@@ -748,6 +807,7 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
         m_hpEdit->setValue(m_yellowCards >= 3 ? 0 : qMax(0, m_hpEdit->value() - 50));
         if (m_hpEdit->value() == 0)
             onSendDeath();
+        if (m_yellowCards >= 3) clearReviveRequest();
         break;
     case proto::TypeForcePowerOff:
         m_powerOnEdit->setChecked(false);
@@ -757,6 +817,10 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
         break;
     default:
         return;
+    }
+    if (result == 0 && (type == proto::TypeGameStart || type == proto::TypeGameEnd
+                        || type == proto::TypeSetHp || type == proto::TypeYellowCard)) {
+        if (!saveReviveState()) result = 2;
     }
     if (result != 2) {
         if (m_completedCommandOrder.size() >= 128)
@@ -771,9 +835,10 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
 
 void SimulatorWindow::retryReliableEvents()
 {
-    if (protocolVersion() != proto::kVersion2)
+    if (!canSendEvents() || protocolVersion() != proto::kVersion2)
         return;
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    advanceReviveState();
+    const qint64 now = protocolNowMs();
     QList<quint32> toRemove;
     for (auto it = m_pendingEvents.begin(); it != m_pendingEvents.end(); ++it) {
         PendingEvent &ev = it.value();
@@ -794,6 +859,169 @@ void SimulatorWindow::retryReliableEvents()
     }
     for (quint32 key : toRemove)
         m_pendingEvents.remove(key);
+}
+
+qint64 SimulatorWindow::protocolNowMs() const
+{
+    return m_protocolTestNowMs >= 0 ? m_protocolTestNowMs
+                                   : QDateTime::currentMSecsSinceEpoch();
+}
+
+void SimulatorWindow::setProtocolTimeForTest(qint64 nowMs)
+{
+    if (!m_running && nowMs >= 0) m_protocolTestNowMs = nowMs;
+}
+
+void SimulatorWindow::advanceProtocolTimeForTest(qint64 elapsedMs)
+{
+    if (m_protocolTestNowMs < 0 || elapsedMs < 0) return;
+    m_protocolTestNowMs += elapsedMs;
+    retryReliableEvents();
+}
+
+void SimulatorWindow::clearReviveRequest()
+{
+    m_reviveRequest.clear();
+    m_reviveRequestPersisted = false;
+    m_reviveRetryAtMs = 0;
+    m_deathDeadlineMs = -1;
+}
+
+bool SimulatorWindow::saveReviveState()
+{
+    if (m_identityProfile.isEmpty()) return false;
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("RobotSimulator"));
+    settings.beginGroup(m_identityProfile);
+    settings.setValue(QStringLiteral("reviveRequest"), m_reviveRequest);
+    settings.setValue(QStringLiteral("deathDeadlineMs"), m_deathDeadlineMs);
+    settings.setValue(QStringLiteral("formalMode"), m_formalMode);
+    settings.setValue(QStringLiteral("roundEnded"), m_roundEnded);
+    settings.setValue(QStringLiteral("endedDead"), m_roundEnded && !m_aliveEdit->isChecked());
+    settings.setValue(QStringLiteral("yellowCards"), m_yellowCards);
+    settings.setValue(QStringLiteral("nextRequestSequence"), m_nextRequestSequence);
+    settings.setValue(QStringLiteral("nextEventTx"), m_nextTxid);
+    QVariantMap approvals;
+    for (auto it = m_completedApprovals.constBegin(); it != m_completedApprovals.constEnd(); ++it)
+        approvals.insert(QString::number(it.key()), it.value());
+    settings.setValue(QStringLiteral("completedApprovals"), approvals);
+    settings.sync();
+    if (settings.status() != QSettings::NoError) {
+        appendLog(tr("无法持久化复活状态；执行结果未知，不宣告批准成功"));
+        return false;
+    }
+    return true;
+}
+
+void SimulatorWindow::loadReviveState()
+{
+    clearReviveRequest();
+    m_completedApprovals.clear();
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
+                       QStringLiteral("Scompetition"), QStringLiteral("RobotSimulator"));
+    settings.beginGroup(m_identityProfile);
+    m_formalMode = settings.value(QStringLiteral("formalMode"), false).toBool();
+    m_roundEnded = settings.value(QStringLiteral("roundEnded"), false).toBool();
+    m_yellowCards = settings.value(QStringLiteral("yellowCards"), 0).toInt();
+    m_nextRequestSequence = quint8(settings.value(QStringLiteral("nextRequestSequence"), 0).toUInt());
+    m_nextTxid = settings.value(QStringLiteral("nextEventTx"), m_nextTxid).toUInt();
+    if (!m_nextTxid) m_nextTxid = 1;
+    const QVariantMap approvals = settings.value(QStringLiteral("completedApprovals")).toMap();
+    for (auto it = approvals.constBegin(); it != approvals.constEnd(); ++it)
+        m_completedApprovals.insert(it.key().toUInt(), quint8(it.value().toUInt()));
+    if (protocolVersion() != proto::kVersion2) return;
+    m_deathDeadlineMs = settings.value(QStringLiteral("deathDeadlineMs"), -1).toLongLong();
+    const QByteArray stored = settings.value(QStringLiteral("reviveRequest")).toByteArray();
+    proto::Frame frame;
+    if (!m_roundEnded && m_yellowCards < 3 && m_formalMode
+        && proto::parseDatagram(stored, frame) && frame.type == proto::TypeReviveRequest
+        && frame.robotId == m_assignedId && frame.robotId && frame.transactionId) {
+        m_reviveRequest = stored;
+        m_reviveRequestPersisted = true;
+        m_reviveRetryAtMs = protocolNowMs();
+    }
+    if (m_roundEnded || m_yellowCards >= 3) clearReviveRequest();
+    m_hpEdit->setMaximum(m_formalMode ? kDefaultHp : kPreparationHp);
+    const bool dead = m_deathDeadlineMs >= 0 || !m_reviveRequest.isEmpty()
+                      || m_yellowCards >= 3
+                      || (m_roundEnded && settings.value(QStringLiteral("endedDead"), false).toBool());
+    m_hpEdit->setValue(dead ? 0 : m_hpEdit->maximum());
+    m_aliveEdit->setChecked(!dead);
+    m_shootEdit->setChecked(!dead && !m_roundEnded);
+}
+
+void SimulatorWindow::requestRevive()
+{
+    if (!canSendEvents() || !m_formalMode || m_roundEnded || m_yellowCards >= 3
+        || m_aliveEdit->isChecked()) return;
+    if (m_reviveRequest.isEmpty()) {
+        const quint8 sequence = m_nextRequestSequence++;
+        const quint32 txid = allocateTxid();
+        m_reviveRequest = proto::makeReviveRequest(robotId(), sequence, txid);
+        m_reviveRequestPersisted = false;
+    }
+    if (!m_reviveRequestPersisted) {
+        m_reviveRequestPersisted = saveReviveState();
+        if (!m_reviveRequestPersisted) return;
+    }
+    sendDatagram(m_reviveRequest, tr("复活申请（等待服务器批准）"));
+    m_reviveRetryAtMs = protocolNowMs() + kReliableRetryMs;
+}
+
+void SimulatorWindow::advanceReviveState()
+{
+    if (!canSendEvents() || protocolVersion() != proto::kVersion2
+        || m_roundEnded || m_yellowCards >= 3) return;
+    const qint64 now = protocolNowMs();
+    if (!m_reviveRequest.isEmpty()) {
+        // Requests survive every F0 and retry the exact persisted identity forever.
+        if (now >= m_reviveRetryAtMs) requestRevive();
+    } else if (m_deathDeadlineMs >= 0 && now >= m_deathDeadlineMs) {
+        if (m_formalMode) requestRevive();
+        else {
+            executeRevive(); // Preparation: 200 HP auto-revive after 5s.
+            saveReviveState();
+        }
+    }
+}
+
+void SimulatorWindow::handleReviveApproval(quint8 sequence, quint32 txid,
+                                           const QHostAddress &addr, quint16 port)
+{
+    if (!m_formalMode || m_roundEnded || m_yellowCards >= 3) {
+        sendAck(addr, port, proto::TypeReviveApprove, txid, 1);
+        return;
+    }
+    const auto completed = m_completedApprovals.constFind(txid);
+    if (completed != m_completedApprovals.constEnd()) {
+        // A duplicate only replays its ACK; never heals again after a later hit/death.
+        sendAck(addr, port, proto::TypeReviveApprove, txid,
+                completed.value() == sequence ? 0 : 1);
+        return;
+    }
+    proto::Frame request;
+    if (!m_reviveRequestPersisted || !proto::parseDatagram(m_reviveRequest, request)
+        || request.transactionId != txid || request.requestSequence != sequence
+        || m_aliveEdit->isChecked()) {
+        sendAck(addr, port, proto::TypeReviveApprove, txid, 1);
+        return;
+    }
+    const QByteArray savedRequest = m_reviveRequest;
+    const qint64 savedDeadline = m_deathDeadlineMs;
+    m_completedApprovals.insert(txid, sequence);
+    clearReviveRequest();
+    // Commit consumption before publishing a revive. Failure retains the request
+    // and returns unknown (2), never an unsaved success claim.
+    if (!saveReviveState()) {
+        m_completedApprovals.remove(txid);
+        m_reviveRequest = savedRequest;
+        m_reviveRequestPersisted = true;
+        m_deathDeadlineMs = savedDeadline;
+        sendAck(addr, port, proto::TypeReviveApprove, txid, 2);
+        return;
+    }
+    executeRevive();
+    sendAck(addr, port, proto::TypeReviveApprove, txid, 0);
 }
 
 void SimulatorWindow::appendLog(const QString &message)

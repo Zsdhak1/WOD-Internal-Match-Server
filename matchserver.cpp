@@ -106,6 +106,23 @@ bool MatchServer::start(quint16 port)
     return true;
 }
 
+void MatchServer::clearRegistrations(const QString &reason)
+{
+    const auto sockets = m_sessions.keys();
+    for (QTcpSocket *socket : sockets) {
+        if (!socket) continue;
+        sendError(socket, reason);
+        socket->disconnectFromHost();
+    }
+    m_sessions.clear();
+    m_teamSessions.clear();
+    for (quint8 side : {quint8(1), quint8(2)}) stopVideoDecoder(side);
+    m_videoBuffers.clear();
+    emitVideoSources();
+    emit clientCountChanged(0);
+    emit logMessage(tr("[对阵切换] 已撤销旧选手登记，请双方重新登记"));
+}
+
 void MatchServer::stop()
 {
     if (!m_server->isListening() && m_sessions.isEmpty() && m_videoSockets.isEmpty())

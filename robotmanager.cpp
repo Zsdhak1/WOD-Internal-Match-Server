@@ -73,6 +73,7 @@ void RobotManager::handleDatagram(const QByteArray &data,
 
     // V2 ACK 帧不属于机器人状态，直接转发给下行管理器
     if (f.version == proto::kVersion2 && f.type == proto::TypeAck) {
+        emit ackReceivedFrom(f.ackedFrameType, f.transactionId, f.result, addr, port);
         emit ackReceived(f.ackedFrameType, f.transactionId, f.result, f.robotId);
         return;
     }
@@ -85,6 +86,19 @@ void RobotManager::handleDatagram(const QByteArray &data,
 
     const quint32 senderIpv4 = addr.toIPv4Address();
     const QString senderText = addr.toString();
+
+    // Downlink traffic must never register/refresh a robot or its combat state.
+    if (f.version == proto::kVersion2 && proto::isDownlinkCommand(f.type))
+        return;
+    if (f.version == proto::kVersion2 && f.type == proto::TypeReviveRequest) {
+        if (!f.robotId || !f.transactionId || !port)
+            return;
+        m_endpoints.insert(f.robotId, {senderIpv4, proto::kDownlinkPort});
+        emit endpointLearned(f.robotId, senderIpv4, proto::kDownlinkPort);
+        emit reviveRequested(f.robotId, f.requestSequence, f.transactionId,
+                             senderIpv4, port);
+        return; // No fake alive/death/status, no processed-event marker, no F0 ACK.
+    }
 
     // DEVICE_ANNOUNCE is the stable identity/registry frame. It may carry
     // robot_id=0 before assignment, so it must not create a fake robot 0.
@@ -194,7 +208,6 @@ void RobotManager::handleDatagram(const QByteArray &data,
 
     // V2 可靠事件去重 + 通知调用方回 ACK
     if (f.version == proto::kVersion2 && proto::isReliableEvent(f.type)) {
-        const quint64 txKey = (quint64(f.type) << 32) | f.transactionId;
         if (isTransactionProcessed(f.robotId, f.type, f.transactionId)) {
             // 已处理过：仍回 ACK，但不重复业务
             emit reliableEventNeedsAck(f.robotId, f.type, f.transactionId, addr, port);

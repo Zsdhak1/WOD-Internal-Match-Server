@@ -12,7 +12,7 @@
 
 namespace proto {
 
-constexpr quint16 kMagic        = 0x5254;   // 固定 magic：0x52 0x54 ('R''T')
+constexpr quint16 kMagic        = 0x5254;   // 小端线序固定为 0x54 0x52
 constexpr quint8  kVersion1     = 1;
 constexpr quint8  kVersion2     = 2;
 constexpr quint16 kUplinkPort   = 5005;     // ESP32 -> 服务器
@@ -32,6 +32,7 @@ enum FrameType : quint8 {
     TypeDeviceAnnounce= 0x0A,   // V2 设备注册：ESP32 Wi-Fi MAC + 手柄 MAC
     TypeCombatEnd     = 0x0B,   // V2 新增：脱离战斗
     TypeDeviceHealth  = 0x0C,   // V2 设备健康位图
+    TypeReviveRequest = 0x0D,   // V2 正式复活申请：10B，seq + request_tx
     // 下行（server -> ESP32）
     TypeGameStart     = 0x81,   // 比赛开始：9B + ACK
     TypeGameEnd       = 0x82,   // 比赛结束：9B + ACK
@@ -41,7 +42,8 @@ enum FrameType : quint8 {
     TypeYellowCard    = 0x86,   // 黄牌处罚：9B + ACK
     TypeForcePowerOff = 0x87,   // 强制断电：9B + ACK
     TypeForcePowerOn  = 0x88,   // 请求通电：9B + ACK
-    TypeAck           = 0xF0,   // ACK 回执：10B
+    TypeReviveApprove = 0x89,   // V2 正式复活批准：10B，原样回显 seq + request_tx
+    TypeAck           = 0xF0,   // ACK 回执：10B（不是复活批准）
 };
 
 // V1 长度表
@@ -83,6 +85,8 @@ inline int expectedSizeV2(int type)
     case TypeAssignment:    return 21;
     case TypeStatusRequest: return 5;
     case TypeSetHp:         return 11;
+    case TypeReviveRequest:
+    case TypeReviveApprove:
     case TypeAck:           return 10;
     default:                return -1;
     }
@@ -111,8 +115,9 @@ struct Frame {
     bool    shootEnabled   = false;
     bool    powerOn        = false;         // V2 only
     quint32 transactionId  = 0;             // V2 reliable events + ACK
+    quint8  requestSequence = 0;            // V2 REVIVE_REQUEST / REVIVE_APPROVE
     quint8  ackedFrameType = 0;             // V2 ACK only
-    quint8  result         = 0;             // V2 ACK only: 0=ok 1=rejected 2=failed
+    quint8  result         = 0;             // V2 ACK: 0=ok 1=rejected 2=failed/unknown execution
     quint8  componentOnline = 0;            // V2 device health bitmap
     quint32 eventQueueDrops = 0;            // V2 DEVICE_ANNOUNCE diagnostics
     quint32 udpSendFailures = 0;            // V2 DEVICE_ANNOUNCE diagnostics
@@ -123,16 +128,13 @@ struct Frame {
 
 inline quint16 readU16(const char *p)
 {
-    quint16 v;
-    std::memcpy(&v, p, 2);
-    return v;
+    return quint16(quint8(p[0])) | (quint16(quint8(p[1])) << 8);
 }
 
 inline quint32 readU32(const char *p)
 {
-    quint32 v;
-    std::memcpy(&v, p, 4);
-    return v;
+    return quint32(quint8(p[0])) | (quint32(quint8(p[1])) << 8)
+           | (quint32(quint8(p[2])) << 16) | (quint32(quint8(p[3])) << 24);
 }
 
 inline void writeU16(QByteArray &data, int offset, quint16 value)
@@ -276,6 +278,26 @@ inline QByteArray makeDeviceHealth(quint8 robotId, quint8 componentOnline)
     return data;
 }
 
+// These are not ordinary 9B reliable events: request_tx starts at offset 6.
+inline QByteArray makeReviveRequest(quint8 robotId, quint8 sequence, quint32 requestTx)
+{
+    QByteArray data(10, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeReviveRequest);
+    data[4] = static_cast<char>(robotId);
+    data[5] = static_cast<char>(sequence);
+    writeU32(data, 6, requestTx);
+    return data;
+}
+
+inline QByteArray makeReviveApprove(quint8 robotId, quint8 sequence, quint32 requestTx)
+{
+    QByteArray data = makeReviveRequest(robotId, sequence, requestTx);
+    data[3] = static_cast<char>(TypeReviveApprove);
+    return data;
+}
+
 // ---------- V2 下行构造（服务端用） ----------
 
 inline QByteArray makeDownlinkBase(quint8 type, quint8 targetId, quint32 txid)
@@ -406,6 +428,11 @@ inline bool parseDatagram(const QByteArray &dg, Frame &out)
     case TypeRevive:
         out.transactionId = readU32(p + 5);
         break;
+    case TypeReviveRequest:
+    case TypeReviveApprove:
+        out.requestSequence = static_cast<quint8>(p[5]);
+        out.transactionId = readU32(p + 6);
+        break;
     case TypeDeviceHealth:
         out.componentOnline = static_cast<quint8>(p[5]);
         break;
@@ -453,7 +480,7 @@ inline bool isDownlinkCommand(quint8 type)
            || type == TypeAssignment || type == TypeStatusRequest
            || type == TypeSetHp
            || type == TypeYellowCard || type == TypeForcePowerOff
-           || type == TypeForcePowerOn;
+           || type == TypeForcePowerOn || type == TypeReviveApprove;
 }
 
 } // namespace proto

@@ -2,6 +2,9 @@
 #include "videocanvas.h"
 #include "protocol.h"
 #include "huddigitslabel.h" // Shared bold, short-bevel angular digits for both outputs.
+#include "competitionoverlay.h" // ReviveIndicator + formal CompetitionOverlay.
+
+#include <cmath>
 
 #include <QCloseEvent>
 #include <QColor>
@@ -615,7 +618,6 @@ private:
 namespace {
 constexpr quint8 kRedTeam = 1;
 constexpr quint8 kBlueTeam = 2;
-constexpr int kMatchDurationSeconds = 60;
 constexpr int kLegacyMaxHp = 5000;
 constexpr int kMaxHp = 300;
 constexpr int kMaxHeat = 1000;
@@ -1547,7 +1549,11 @@ protected:
         setItemGeometry(QStringLiteral("health_bar"), scaleRect(QRect(28, 37, 586, 64)));
         const bool red = parentWidget()->property("team").toString() == QStringLiteral("red");
         setItemGeometry(QStringLiteral("health_text"), scaleRect(QRect(red ? 42 : 486, 37, 112, 64)));
-        setItemGeometry(QStringLiteral("card_row"), scaleRect(QRect(28, 106, 586, 25)));
+        const bool formal = parentWidget()->property("competitionMode").toBool();
+        setItemGeometry(QStringLiteral("revive_count"), scaleRect(QRect(28, 105, 402, 34)));
+        setItemGeometry(QStringLiteral("card_row"),
+                        scaleRect(formal ? QRect(440, 108, 174, 25)
+                                         : QRect(28, 106, 586, 25)));
         setItemGeometry(QStringLiteral("state_layer"), scaleRect(QRect(28, 37, 586, 64)));
         if (const Entry *layer = entry(QStringLiteral("state_layer")); layer && layer->item->widget())
             layer->item->widget()->raise();
@@ -1664,6 +1670,11 @@ BroadcastWindow::BroadcastWindow(QWidget *parent)
             m_settlementProcess = nullptr;
             if (process)
                 process->deleteLater();
+            // The clip is over: the formal verdict card may now appear.
+            if (m_competitionOverlay) {
+                m_competitionOverlay->setSettlementBlocking(false);
+                m_competitionOverlay->raise(); // above the held final clip frame
+            }
             // Let the final settlement frame hold briefly before the data
             // panel slides in over it.
             if (m_summaryRevealTimer)
@@ -1869,6 +1880,15 @@ void BroadcastWindow::buildUi()
     m_summaryPanel = new MatchSummaryPanel(central);
     m_summaryPanel->onToggled = [this](bool expanded) { emit summaryExpandedChanged(expanded); };
 
+    // Formal phases have their own self-drawn presentation layer (countdown,
+    // launch, verdict card, intermission, BO3 final). It covers the whole
+    // central widget, is mouse-transparent and sits above the settlement
+    // view; it hides itself while the clip plays so the clip is never covered.
+    m_competitionOverlay = new CompetitionOverlay(central);
+    m_competitionOverlay->setObjectName(QStringLiteral("competitionOverlay"));
+    m_competitionOverlay->setGeometry(central->rect());
+    m_competitionOverlay->clear();
+
     setCentralWidget(central);
     setMinimumSize(1, 1);
 }
@@ -1950,6 +1970,12 @@ QWidget *BroadcastWindow::createRobotOverlay(const QString &teamTitle,
                                               &overlay->yellowCardIcon));
     cardRowLayout->addStretch(1);
     layout->addElement(QStringLiteral("card_row"), cardRow);
+    // Self-drawn "mech core" revive icons; text() keeps the plain description.
+    overlay->reviveCount = new ReviveIndicator(team == kRedTeam, frame);
+    overlay->reviveCount->setObjectName(team == kRedTeam ? QStringLiteral("redReviveCount")
+                                                        : QStringLiteral("blueReviveCount"));
+    layout->addElement(QStringLiteral("revive_count"), overlay->reviveCount);
+    overlay->reviveCount->hide();
     setBaseFont(overlay->redCard, 18, true);
     setBaseFont(overlay->yellowCard, 18, true);
 
@@ -2270,6 +2296,10 @@ void BroadcastWindow::updateRobots(const QVector<RobotManager::RobotInfo> &robot
 
 void BroadcastWindow::updateMatchState()
 {
+    if (m_competitionMode) {
+        updateCompetitionPresentation();
+        return;
+    }
     QString phase;
     if (m_roundEnded)
         phase = tr("比赛结束");
@@ -2279,7 +2309,7 @@ void BroadcastWindow::updateMatchState()
         phase = tr("时间到 · 判定中");
     else if (m_matchRunning)
         phase = tr("比赛进行中");
-    else if (m_remainingSeconds < kMatchDurationSeconds)
+    else if (m_remainingSeconds < m_clockDuration)
         phase = tr("比赛暂停");
     else
         phase = tr("准备开始");
@@ -2316,21 +2346,25 @@ void BroadcastWindow::updateTimerDisplay()
 {
     const int minutes = m_remainingSeconds / 60;
     const int seconds = m_remainingSeconds % 60;
-    m_timerLabel->setText(QStringLiteral("%1:%2")
-                              .arg(minutes, 2, 10, QLatin1Char('0'))
-                              .arg(seconds, 2, 10, QLatin1Char('0')));
+    const QString clockText = QStringLiteral("%1:%2")
+                                  .arg(minutes, 2, 10, QLatin1Char('0'))
+                                  .arg(seconds, 2, 10, QLatin1Char('0'));
+    const bool clockChanged = m_timerLabel->text() != clockText;
+    m_timerLabel->setText(clockText);
 
     // Clock colour follows the phase: pulsing red in the final ten seconds,
     // softly cool-white while paused (not dark/occluded), default otherwise.
     const bool finalCountdown = m_matchRunning && m_remainingSeconds > 0
                                 && m_remainingSeconds <= 10;
     if (finalCountdown) {
-        m_timerPulse->stop();
-        m_timerPulse->start();
+        if (!m_competitionMode || clockChanged) {
+            m_timerPulse->stop();
+            m_timerPulse->start();
+        }
     } else {
         m_timerPulse->stop();
         const bool paused = !m_matchRunning && !m_roundEnded && m_remainingSeconds > 0
-                            && m_remainingSeconds < kMatchDurationSeconds;
+                            && m_remainingSeconds < m_clockDuration;
         m_timerLabel->setStyleSheet(paused ? QStringLiteral("color: #dcebf1; background: transparent;")
                                    : m_remainingSeconds == 0 ? QStringLiteral("color: #ff6872;")
                                                              : QString());
@@ -2341,6 +2375,8 @@ void BroadcastWindow::updateTimerDisplay()
 
 void BroadcastWindow::startMatch()
 {
+    if (m_competitionMode)
+        return; // Formal clocks are owned exclusively by the server flow.
     // Starting a finished round resets presentation; the owner resets the
     // authoritative per-round kill score before sending GAME_START.
     if (m_roundEnded || (m_remainingSeconds == 0 && !m_suddenDeath))
@@ -2359,6 +2395,8 @@ void BroadcastWindow::startMatch()
 
 void BroadcastWindow::pauseMatch()
 {
+    if (m_competitionMode)
+        return;
     if (!m_matchRunning)
         return;
     m_matchRunning = false;
@@ -2369,6 +2407,7 @@ void BroadcastWindow::pauseMatch()
 
 void BroadcastWindow::resetRound()
 {
+    leaveCompetitionPresentation();
     stopSettlement();
     clearMatchSummary();
     m_matchTimer->stop();
@@ -2377,7 +2416,7 @@ void BroadcastWindow::resetRound()
     m_settlementType.clear();
     m_refereeNotice.clear();
     m_suddenDeath = false;
-    m_remainingSeconds = kMatchDurationSeconds;
+    m_remainingSeconds = m_clockDuration;
     clearCards();
     m_lastHp.clear();
     updateTimerDisplay();
@@ -2394,9 +2433,10 @@ void BroadcastWindow::resetMatch()
 
 void BroadcastWindow::setMatchState(int remainingSeconds, bool running, bool suddenDeath)
 {
+    leaveCompetitionPresentation();
     stopSettlement();
     m_suddenDeath = suddenDeath;
-    m_remainingSeconds = qBound(0, remainingSeconds, kMatchDurationSeconds);
+    m_remainingSeconds = qBound(0, remainingSeconds, m_clockDuration);
     m_matchRunning = running && (m_remainingSeconds > 0 || m_suddenDeath);
     m_roundEnded = false;
     m_settlementType.clear();
@@ -2409,16 +2449,227 @@ void BroadcastWindow::setMatchState(int remainingSeconds, bool running, bool sud
     emit matchStateChanged(m_matchRunning);
 }
 
+void BroadcastWindow::setClockDuration(int seconds)
+{
+    const int duration = qMax(1, seconds);
+    if (duration == m_clockDuration)
+        return;
+    const bool atStart = !m_competitionMode && !m_matchRunning && !m_roundEnded
+                         && m_remainingSeconds == m_clockDuration;
+    m_clockDuration = duration;
+    if (!m_competitionMode) {
+        m_remainingSeconds = atStart ? duration : qMin(m_remainingSeconds, duration);
+        updateTimerDisplay();
+    }
+}
+
+void BroadcastWindow::leaveCompetitionPresentation()
+{
+    if (!m_competitionMode)
+        return;
+    m_competitionMode = false;
+    m_competitionState = QJsonObject();
+    m_competitionPhase.clear();
+    m_competitionReason.clear();
+    m_competitionSettlementKey.clear();
+    if (m_competitionOverlay)
+        m_competitionOverlay->clear(); // Legacy mode: no formal presentation.
+    m_matchTitle->setText(tr("1v1 对抗赛 · 1v1 Соревнование"));
+    for (auto it = m_overlays.begin(); it != m_overlays.end(); ++it) {
+        it.value().reviveCount->hide();
+        QWidget *panel = it.value().reviveCount->parentWidget();
+        panel->setProperty("competitionMode", false);
+        panel->layout()->invalidate();
+        panel->layout()->activate();
+    }
+    clearMatchSummary();
+}
+
+void BroadcastWindow::setCompetitionState(const QJsonObject &state)
+{
+    if (state.value(QStringLiteral("scoringRule")).toString()
+        != QStringLiteral("remaining_resources"))
+        return;
+    const QString phase = state.value(QStringLiteral("phase")).toString();
+    const bool boundary = !m_competitionMode
+        || state.value(QStringLiteral("matchId")) != m_competitionState.value(QStringLiteral("matchId"))
+        || state.value(QStringLiteral("roundId")) != m_competitionState.value(QStringLiteral("roundId"));
+    const bool wasRunning = m_matchRunning;
+    if (boundary) {
+        stopSettlement();
+        clearMatchSummary();
+        m_competitionReason.clear();
+        m_competitionSettlementKey.clear();
+        m_lastHp.clear();
+        clearCards();
+    } else if (phase != m_competitionPhase
+               && (phase == QStringLiteral("ready") || phase == QStringLiteral("countdown")
+                   || phase == QStringLiteral("starting") || phase == QStringLiteral("running"))) {
+        stopSettlement();
+    }
+    m_competitionMode = true;
+    m_competitionState = state;
+    m_competitionPhase = phase;
+    m_matchTimer->stop(); // Never locally advance/expire an authoritative snapshot.
+    m_suddenDeath = false;
+    m_remainingSeconds = qMax(0, state.value(QStringLiteral("remainingSeconds")).toInt());
+    // After a round ends the main clock freezes on that round's final time; the
+    // 120 s preparation countdown belongs only to the overlay's intermission bar,
+    // so the HUD never reads "02:00" as if the next round were already running.
+    // CompetitionFlow reports roundRemainingSeconds=180 outside Running, so the
+    // frozen value is derived from the authoritative round duration instead.
+    if (phase == QStringLiteral("intermission") || phase == QStringLiteral("match_finished")
+        || phase == QStringLiteral("cancelled")) {
+        const QJsonValue duration = state.value(QStringLiteral("summary")).toObject()
+                                        .value(QStringLiteral("durationMs"));
+        const double ms = duration.isDouble() ? duration.toDouble() : -1.0;
+        if (ms >= 0.0 && std::isfinite(ms)) {
+            // Formal rounds are always 180 s (CompetitionFlow::kRoundMs); do not
+            // depend on m_clockDuration, which still holds the legacy 60 s default.
+            constexpr int kFormalRoundSeconds = 180;
+            const int elapsed = int(qMin(ms, 24.0 * 3600 * 1000) / 1000.0);
+            m_remainingSeconds = qBound(0, kFormalRoundSeconds - elapsed, kFormalRoundSeconds);
+        } else {
+            m_remainingSeconds = 0; // Unknown duration: never imply a running clock.
+        }
+    }
+    m_matchRunning = phase == QStringLiteral("running");
+    m_roundEnded = state.value(QStringLiteral("ended")).toBool();
+    m_refereeNotice = state.value(QStringLiteral("notice")).toString();
+    const QString redName = state.value(QStringLiteral("redName")).toString();
+    const QString blueName = state.value(QStringLiteral("blueName")).toString();
+    if (!redName.isEmpty() || !blueName.isEmpty())
+        setTeamNames(redName.isEmpty() ? redTeamName() : redName,
+                     blueName.isEmpty() ? blueTeamName() : blueName);
+    const int red = state.value(QStringLiteral("redScore")).toInt();
+    const int blue = state.value(QStringLiteral("blueScore")).toInt();
+    if (boundary || red != m_redScore || blue != m_blueScore)
+        setScores(red, blue);
+
+    const QJsonObject summary = state.value(QStringLiteral("summary")).toObject();
+    if (!summary.isEmpty() && summary.value(QStringLiteral("valid")).toBool(true)) {
+        m_matchSummary = summary;
+        const QString reason = summary.value(QStringLiteral("reasonText")).toString().trimmed();
+        if (!reason.isEmpty())
+            m_competitionReason = reason;
+    }
+    // Repeated 100 ms snapshots never clear summary or restart a clip. The
+    // normal legacy summary API remains available outside formal presentation.
+    m_summaryRevealTimer->stop();
+    m_summaryPanel->hide();
+    const QString settlement = state.value(QStringLiteral("settlement")).toString().trimmed().toLower();
+    const QString settlementKey = state.value(QStringLiteral("matchId")).toString()
+        + QLatin1Char('/') + state.value(QStringLiteral("roundId")).toString()
+        + QLatin1Char('/') + settlement;
+    if (m_roundEnded && !settlement.isEmpty()
+        && m_competitionSettlementKey != settlementKey) {
+        m_competitionSettlementKey = settlementKey;
+        playSettlement(settlement); // Use the explicit server verdict only.
+    } else if (!settlementPlaying()) {
+        m_settlementType = settlement;
+    }
+    // After the settlement decision so a clip that just started already
+    // blocks the verdict card (no one-frame flash over the video).
+    if (m_competitionOverlay) {
+        m_competitionOverlay->setSettlementBlocking(settlementPlaying());
+        m_competitionOverlay->setCompetitionState(state);
+    }
+    updateWinnerHighlight();
+    updateTimerDisplay();
+    if (wasRunning != m_matchRunning)
+        emit matchStateChanged(m_matchRunning);
+}
+
+void BroadcastWindow::updateCompetitionPresentation()
+{
+    QString phaseText;
+    if (m_competitionPhase == QStringLiteral("ready"))
+        phaseText = tr("准备就绪 · 等待裁判开赛");
+    else if (m_competitionPhase == QStringLiteral("countdown"))
+        phaseText = tr("开赛倒计时");
+    else if (m_competitionPhase == QStringLiteral("starting"))
+        phaseText = tr("设备确认中 · 等待双方开赛确认");
+    else if (m_competitionPhase == QStringLiteral("running"))
+        phaseText = tr("正式局进行中 · 180 秒");
+    else if (m_competitionPhase == QStringLiteral("awaiting_decision"))
+        phaseText = tr("等待裁判判定");
+    else if (m_competitionPhase == QStringLiteral("intermission"))
+        phaseText = m_remainingSeconds > 0 ? tr("局间准备") : tr("下局准备完 · 等待裁判");
+    else if (m_competitionPhase == QStringLiteral("match_finished"))
+        phaseText = tr("BO3 比赛结束");
+    else if (m_competitionPhase == QStringLiteral("cancelled"))
+        phaseText = tr("比赛已取消");
+    else
+        phaseText = tr("等待赛事状态");
+    const int round = qMax(1, m_competitionState.value(QStringLiteral("roundIndex")).toInt(1));
+    m_matchTitle->setText(tr("BO3 · 第 %1 小局 · 胜局 %2 : %3")
+                             .arg(round).arg(m_redScore).arg(m_blueScore));
+    m_matchState->setText(m_refereeNotice.isEmpty() ? phaseText
+                          : tr("%1 · %2").arg(phaseText, m_refereeNotice));
+    const bool alert = !m_refereeNotice.isEmpty();
+    if (m_matchState->property("alert").toBool() != alert) {
+        m_matchState->setProperty("alert", alert);
+        m_matchState->style()->unpolish(m_matchState);
+        m_matchState->style()->polish(m_matchState);
+    }
+    for (const quint8 team : {kRedTeam, kBlueTeam}) {
+        RobotOverlay &overlay = m_overlays[team];
+        const QString prefix = team == kRedTeam ? QStringLiteral("red") : QStringLiteral("blue");
+        const QJsonValue value = m_competitionState.value(prefix + QStringLiteral("RemainingRevives"));
+        const int count = value.isDouble() ? value.toInt(-1) : -1; // out of 0..3 = unknown
+        const bool pending = m_competitionState.value(prefix + QStringLiteral("RevivePending")).toBool();
+        // Snap while hidden (first formal snapshot); animate consumption/refill after.
+        overlay.reviveCount->setResourceState(count, pending, !overlay.reviveCount->isHidden());
+        overlay.reviveCount->show();
+        QWidget *panel = overlay.reviveCount->parentWidget();
+        if (!panel->property("competitionMode").toBool()) {
+            panel->setProperty("competitionMode", true);
+            panel->layout()->invalidate();
+            panel->layout()->activate();
+        }
+    }
+    layoutCompetitionPresentation();
+}
+
+void BroadcastWindow::layoutCompetitionPresentation()
+{
+    if (!m_competitionOverlay || !centralWidget())
+        return;
+    QWidget *central = centralWidget();
+    if (m_competitionOverlay->geometry() != central->rect())
+        m_competitionOverlay->setGeometry(central->rect());
+    if (!m_competitionMode)
+        return;
+    const qreal scale = m_uiScale;
+    const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    const QRect viewport = scaledHudViewport(this, scale);
+    // The compact intermission bar / verdict card must stay above the bottom
+    // status line and the ticker.
+    int safeBottom = viewport.bottom() - px(m_tickerVisible ? 164 : 100);
+    if (m_matchState && m_matchState->isVisible()) {
+        const int stateTop = m_matchState->mapTo(central, QPoint()).y();
+        if (stateTop > viewport.y() + px(500))
+            safeBottom = qMin(safeBottom, stateTop - px(14));
+    }
+    if (m_tickerBar && m_tickerBar->isVisible() && m_tickerBar->height() > 0) {
+        const int tickerTop = m_tickerBar->mapTo(central, QPoint()).y();
+        if (tickerTop > viewport.y() + px(500))
+            safeBottom = qMin(safeBottom, tickerTop - px(14));
+    }
+    m_competitionOverlay->setLayoutMetrics(viewport, scale, safeBottom);
+    // Above the settlement view; the overlay hides itself while the clip plays.
+    m_competitionOverlay->raise();
+}
 void BroadcastWindow::terminateMatch()
 {
-    if (m_roundEnded)
+    if (m_competitionMode || m_roundEnded)
         return;
     finishMatch(QStringLiteral("termination"));
 }
 
 void BroadcastWindow::concludeRound(const QString &settlementType)
 {
-    if (m_roundEnded || settlementType.trimmed().isEmpty())
+    if (m_competitionMode || m_roundEnded || settlementType.trimmed().isEmpty())
         return;
     finishMatch(settlementType.trimmed().toLower());
 }
@@ -2517,6 +2768,14 @@ void BroadcastWindow::playSettlement(const QString &type)
     const QString alphaPath = settlementAssetPath(normalizedType, QStringLiteral("alpha"));
     const QString executable = ffmpegExecutable();
     if (rgbPath.isEmpty() || alphaPath.isEmpty() || executable.isEmpty()) {
+        // A missing optional clip must not obscure the formal reason/reticle;
+        // the verdict card is shown directly instead.
+        if (m_competitionMode) {
+            m_settlementView->hide();
+            if (m_competitionOverlay)
+                m_competitionOverlay->setSettlementBlocking(false);
+            return;
+        }
         if (m_settlementView) {
             m_settlementView->setPixmap(QPixmap());
             m_settlementView->setText(tr("结算动画资源或 FFmpeg 不可用"));
@@ -2536,6 +2795,9 @@ void BroadcastWindow::playSettlement(const QString &type)
         m_settlementView->show();
         m_settlementView->raise();
     }
+    // The clip really plays now: hide the verdict card until it ends.
+    if (m_competitionOverlay)
+        m_competitionOverlay->setSettlementBlocking(true);
     m_settlementFrameTimer->start();
 
     m_settlementProcess = new QProcess(this);
@@ -2558,6 +2820,19 @@ void BroadcastWindow::playSettlement(const QString &type)
                 m_settlementFinished = true;
                 if (m_lastSettlementFrame.isNull() && m_settlementFrames.isEmpty()
                     && m_settlementView) {
+                    if (m_competitionMode) {
+                        // FFmpeg failed before any frame: reveal the card now.
+                        m_settlementView->hide();
+                        QProcess *failed = m_settlementProcess;
+                        m_settlementProcess = nullptr;
+                        if (m_settlementFrameTimer)
+                            m_settlementFrameTimer->stop();
+                        if (failed)
+                            failed->deleteLater();
+                        if (m_competitionOverlay)
+                            m_competitionOverlay->setSettlementBlocking(false);
+                        return;
+                    }
                     m_settlementView->setText(tr("结算动画播放失败"));
                     m_settlementView->show();
                     m_settlementView->raise();
@@ -2594,6 +2869,8 @@ void BroadcastWindow::stopSettlement()
         m_settlementFrameTimer->stop();
     if (m_settlementView)
         m_settlementView->hide();
+    if (m_competitionOverlay)
+        m_competitionOverlay->setSettlementBlocking(false);
     if (!process)
         return;
 
@@ -2680,7 +2957,7 @@ void BroadcastWindow::setSummaryExpanded(bool expanded, bool animated)
 
 void BroadcastWindow::revealSummaryIfReady()
 {
-    if (!m_summaryPanel || !m_roundEnded || settlementPlaying()
+    if (m_competitionMode || !m_summaryPanel || !m_roundEnded || settlementPlaying()
         || !m_matchSummary.value(QStringLiteral("valid")).toBool()) {
         return;
     }
@@ -2723,7 +3000,8 @@ void BroadcastWindow::layoutSummaryPanel()
 
 void BroadcastWindow::updateWinnerHighlight()
 {
-    const bool valid = m_roundEnded && m_matchSummary.value(QStringLiteral("valid")).toBool();
+    const bool valid = m_roundEnded && !m_matchSummary.isEmpty()
+        && m_matchSummary.value(QStringLiteral("valid")).toBool(m_competitionMode);
     const int winner = valid ? m_matchSummary.value(QStringLiteral("winner")).toInt() : 0;
     for (auto it = m_overlays.begin(); it != m_overlays.end(); ++it) {
         if (auto *layer = static_cast<HudStateLayer *>(it.value().stateLayer))
@@ -2864,6 +3142,8 @@ void BroadcastWindow::setTeamNames(const QString &redName, const QString &blueNa
         it.value().team->setText(m_teamNames.value(static_cast<quint8>(it.key())));
     if (m_summaryPanel && !m_matchSummary.isEmpty())
         m_summaryPanel->setSummary(m_matchSummary, redTeamName(), blueTeamName());
+    if (m_competitionOverlay)
+        m_competitionOverlay->setTeamNameFallback(redTeamName(), blueTeamName());
 
     emit presentationStateChanged();
 }
@@ -3169,6 +3449,20 @@ void BroadcastWindow::renderProgramFrame()
     const QSize targetSize = m_programView->size();
     if (targetSize.isEmpty())
         return;
+    // Qt's offscreen/minimal platforms cannot create a QOpenGLWidget context.
+    // Keep the exact same real widget HUD and use the raster background path
+    // for QA (also useful when a venue machine explicitly disables GPU video).
+    const QString platform = QGuiApplication::platformName();
+    if (platform == QStringLiteral("offscreen") || platform == QStringLiteral("minimal")
+        || qEnvironmentVariableIntValue("SCOMP_BROADCAST_SOFTWARE_VIDEO") != 0) {
+        if (m_videoCanvas)
+            m_videoCanvas->hide();
+        m_programView->setText(QString());
+        m_programView->setPixmap(QPixmap::fromImage(frame).scaled(
+            targetSize, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+        m_programView->show();
+        return;
+    }
     // A status-only HUD does not need an OpenGL surface. Create it only
     // when video arrives, so software/offscreen HUD rendering also works.
     if (!m_videoCanvas) {
@@ -3446,6 +3740,24 @@ void BroadcastWindow::showOnScreen(QScreen *screen)
     activateWindow();
 }
 
+BroadcastWindow::~BroadcastWindow()
+{
+    // A settlement FFmpeg child may still be running. ~QObject would destroy it
+    // after this class's members are gone, and its finished/errorOccurred
+    // lambdas would then run on a half-destroyed window. Detach and stop it now.
+    if (m_settlementFrameTimer)
+        m_settlementFrameTimer->stop();
+    if (QProcess *process = m_settlementProcess) {
+        m_settlementProcess = nullptr;
+        process->disconnect(this);
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+            process->waitForFinished(1000);
+        }
+        delete process;
+    }
+}
+
 void BroadcastWindow::closeEvent(QCloseEvent *event)
 {
     event->ignore();
@@ -3460,6 +3772,7 @@ void BroadcastWindow::showEvent(QShowEvent *event)
     applyUiScale();
     applyLayoutPositions();
     layoutSummaryPanel();
+    layoutCompetitionPresentation();
     scheduleProgramRender();
     emit visibilityChanged(true);
 }
@@ -3482,6 +3795,7 @@ void BroadcastWindow::resizeEvent(QResizeEvent *event)
     if (isVisible())
         applyLayoutPositions();
     layoutSummaryPanel();
+    layoutCompetitionPresentation();
     scheduleProgramRender();
     if (!m_lastSettlementFrame.isNull())
         renderSettlementFrame(m_lastSettlementFrame);

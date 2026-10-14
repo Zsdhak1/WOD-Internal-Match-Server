@@ -3,9 +3,11 @@
 
 #include "matchreferee.h"
 #include "matchserver.h"
+#include "competitionflow.h"
 
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <functional>
 
 class CheckinPanel;
 class FieldCamera;
@@ -32,14 +34,18 @@ class QTableWidget;
 class QTabWidget;
 class QTimer;
 class ResponsiveUiScaler;
+class RefereeEntryPanel;
 
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget *parent = nullptr, FieldCameraBackend *cameraBackend = nullptr);
+    explicit MainWindow(QWidget *parent = nullptr, FieldCameraBackend *cameraBackend = nullptr,
+                        std::function<qint64()> monotonicClock = {});
     ~MainWindow() override;
+    // Import a schedule as a preview; applying a row is an explicit operation.
+    bool importTeamTable(const QString &filePath, QString *errorMessage);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -124,7 +130,17 @@ private:
     void sendGameCommand(bool start);
     void refreshRefereeStatus();
     void syncRefereeState();
-    qint64 refereeNow() const { return m_refereeClock.elapsed(); }
+    qint64 refereeNow() const { return m_monotonicClock ? m_monotonicClock() : m_refereeClock.elapsed(); }
+    std::function<qint64()> m_monotonicClock;
+    bool competitionMode() const { return m_useCompetition; }
+    QVector<RobotManager::RobotInfo> activeMatchRobots() const;
+    bool bindCompetitionRobots(QString *error);
+    void updateCompetition();
+    QJsonObject competitionSnapshot() const;
+    void refreshCompetitionUi();
+    bool persistCompetitionLedger();
+    void onReviveRequested(quint8 robotId, quint8 sequence, quint32 txid, quint32 ipv4, quint16 port);
+    void saveRoundResult(const QJsonObject &summary);
     void applyResponsiveUi();
     void startListen();
     void stopListen();
@@ -138,7 +154,6 @@ private:
     void refreshSourcePreviewBadges();
     void refreshLayoutPositionEditors();
     void refreshDeviceList();
-    bool importTeamTable(const QString &filePath, QString *errorMessage);
     void updateTeamPairControls();
     void applyTeamPair(int index, bool resetMatch);
     QString layoutFilePath() const;
@@ -226,6 +241,27 @@ private:
     QVector<TeamPair> m_teamPairs;
     int             m_currentTeamPairIndex = -1;
     bool            m_listening = false;
+
+    CompetitionFlow m_competition;
+    bool m_useCompetition = true;
+    bool m_ledgerHealthy = true;
+    QComboBox *m_ruleProfileEdit = nullptr;
+    QComboBox *m_teamPairEdit = nullptr;
+    QPushButton *m_applyTeamPairBtn = nullptr;
+    QLabel *m_competitionPhaseLabel = nullptr;
+    QLabel *m_redRevivesLabel = nullptr;
+    QLabel *m_blueRevivesLabel = nullptr;
+    QLabel *m_redScoreLabel = nullptr;
+    QLabel *m_blueScoreLabel = nullptr;
+    RefereeEntryPanel *m_refereeEntryPanel = nullptr;
+    QHash<quint8, quint8> m_activeRobotIds; // side -> robot ID, locked for this BO3
+    QHash<quint8, QString> m_activeDeviceMacs;
+    QHash<quint8, bool> m_startAcknowledged;
+    qint64 m_startRequestEpochMs = -1;
+    qint64 m_startRequestMonotonicMs = -1;
+    quint64 m_competitionRevision = 0;
+    QJsonObject m_lastRoundSummary;
+    int m_refereeEntryTabIndex = -1;
 
     // Automatic verdict
     MatchReferee    m_referee;

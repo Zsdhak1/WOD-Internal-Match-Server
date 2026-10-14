@@ -4,9 +4,11 @@ param(
     [string]$BuildDirectory,
     [string]$QtDirectory = 'G:\Dev\Qt\6.8.3\msvc2022_64',
     [string]$VisualStudioDirectory,
+    [string]$WindowsSdkEnvironment,
     [ValidateRange(1, 128)][int]$Jobs = 4,
     [switch]$Test,
     [switch]$BuildOnly,
+    [switch]$CleanFirst,
     [switch]$ConfigureOnly,
     [switch]$SplitPackages,
     [string]$PythonExecutable = 'python',
@@ -57,21 +59,74 @@ if ($SplitPackages) {
 if ($Plan) { return }
 if (-not $SplitPackages -and -not $BuildOnly -and -not $ConfigureOnly -and (Test-Path -LiteralPath $release)) { throw "Export already exists; refusing to overwrite: $release" }
 
+# Keep native diagnostics and PowerShell decoding on UTF-8. VSLANG is only a
+# preference: an installation with just the Chinese clui.dll still uses Chinese.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+$env:VSLANG = '1033'
 # Import the compiler environment into this process; quoted paths support spaces.
-$environmentCommand = 'call "' + $developer + '" -arch=x64 >nul && set'
+$sdkSwitch = if ($WindowsSdkEnvironment) { ' -winsdk=none' } else { '' }
+$environmentCommand = 'call "' + $developer + '" -arch=x64 -host_arch=x64' + $sdkSwitch + ' >nul && set'
 $environment = & $env:ComSpec /d /c $environmentCommand
 if ($LASTEXITCODE -ne 0) { throw 'Visual Studio environment initialization failed.' }
 foreach ($line in $environment) {
     if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
 }
+if ($WindowsSdkEnvironment) {
+    if (-not (Test-Path -LiteralPath $WindowsSdkEnvironment -PathType Leaf)) { throw "SDK environment script not found: $WindowsSdkEnvironment" }
+    . $WindowsSdkEnvironment
+}
+if ($Configuration -eq 'Debug') {
+    $debugVersions = Join-Path $VisualStudioDirectory 'VC\Redist\MSVC'
+    if (Test-Path -LiteralPath $debugVersions) {
+        $debugCrt = Get-ChildItem -LiteralPath $debugVersions -Directory | Sort-Object Name -Descending | ForEach-Object {
+            Get-ChildItem -LiteralPath (Join-Path $_.FullName 'debug_nonredist\x64') -Directory -ErrorAction SilentlyContinue
+        } | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'vcruntime140d.dll') } | Select-Object -First 1
+        if ($debugCrt) { $env:PATH = "$($debugCrt.FullName);$env:PATH" }
+    }
+}
 $env:PATH = "$cmakeBin;$ninja;$env:PATH"
+& $env:ComSpec /d /c 'chcp 65001 >nul'
+# CMake's AUTO decoding can misread UTF-8 localized /showIncludes diagnostics.
+# Measure the installed compiler's real prefix before generating Ninja rules.
+$probeDirectory = Join-Path $BuildDirectory 'CMakeFiles\scomp-includes-probe'
+New-Item -ItemType Directory -Path $probeDirectory -Force | Out-Null
+$probeSource = Join-Path $probeDirectory 'includes-probe.cpp'
+$probeHeader = Join-Path $probeDirectory 'includes-probe.h'
+$probeOutput = Join-Path $probeDirectory 'includes-probe.raw'
+$probeObject = Join-Path $probeDirectory 'includes-probe.obj'
+'#pragma once' | Set-Content -LiteralPath $probeHeader -Encoding ascii
+'#include "includes-probe.h"' | Set-Content -LiteralPath $probeSource -Encoding ascii
+$compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+$probeCommand = 'chcp 65001 >nul && "' + $compiler + '" /nologo /c /showIncludes /Fo"' + $probeObject + '" "' + $probeSource + '" >"' + $probeOutput + '" 2>&1'
+& $env:ComSpec /d /c $probeCommand
+if ($LASTEXITCODE -ne 0) { throw "Compiler dependency probe failed: $probeOutput" }
+$probeText = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($probeOutput))
+$prefixMatch = [regex]::Match($probeText, '(?m)^([^:\r\n]+:[^:\r\n]+:[ \t]+)(?=[A-Za-z]:\\)')
+if (-not $prefixMatch.Success) { throw "Cannot identify actual /showIncludes prefix: $probeOutput" }
+$env:SCOMP_MSVC_INCLUDES_PREFIX = $prefixMatch.Groups[1].Value
+Write-Host "Compiler dependency prefix: $($env:SCOMP_MSVC_INCLUDES_PREFIX)"
 function Invoke-Checked([string]$program, [string[]]$arguments) {
     & $program @arguments
     if ($LASTEXITCODE -ne 0) { throw "$program failed with exit code $LASTEXITCODE" }
 }
-Invoke-Checked $cmake @('-S', $source, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_PREFIX_PATH=$QtDirectory", "-DSCOMP_BUILD_TIMESTAMP=$timestamp")
+$configureArguments = @('-S', $source, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_PREFIX_PATH=$QtDirectory", "-DSCOMP_BUILD_TIMESTAMP=$timestamp")
+if ($WindowsSdkEnvironment) {
+    $configureArguments += "-DCMAKE_RC_COMPILER=$((Get-Command rc.exe -ErrorAction Stop).Source)"
+    $configureArguments += "-DCMAKE_MT=$((Get-Command mt.exe -ErrorAction Stop).Source)"
+}
+Invoke-Checked $cmake $configureArguments
 if ($ConfigureOnly) { return }
-Invoke-Checked $cmake @('--build', $BuildDirectory, '--config', $Configuration, '-j', "$Jobs")
+$buildArguments = @('--build', $BuildDirectory, '--config', $Configuration, '-j', "$Jobs")
+if ($CleanFirst) { $buildArguments += '--clean-first' }
+Invoke-Checked $cmake $buildArguments
+if ($Configuration -eq 'Debug' -and $WindowsSdkEnvironment) {
+    # windeployqt cannot locate Debug UCRT in the project-local NuGet SDK.
+    # Keep this development-only DLL beside the binaries; never add it to Release packages.
+    $debugUcrt = Join-Path $env:WindowsSdkVerBinPath 'x64\ucrt\ucrtbased.dll'
+    if (-not (Test-Path -LiteralPath $debugUcrt -PathType Leaf)) { throw "Debug UCRT missing: $debugUcrt" }
+    Invoke-Checked $cmake @('-E', 'copy_if_different', $debugUcrt, (Join-Path $BuildDirectory 'ucrtbased.dll'))
+}
 if ($Test) {
     # Qt's offscreen integration test needs the platform plugin when run from
     # a build tree; deployed release folders get plugins from windeployqt.

@@ -30,6 +30,11 @@ public:
     // window and ensures every translation unit sees one destructor symbol.
     ~SimulatorWindow() override;
 
+    // Deterministic protocol clock: does not bypass the UDP/state-machine path.
+    // Set before starting the simulator; advance runs timers without sleeping 5s.
+    void setProtocolTimeForTest(qint64 nowMs);
+    void advanceProtocolTimeForTest(qint64 elapsedMs);
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
 
@@ -72,6 +77,15 @@ private:
     bool saveDeviceAssignment(quint8 id, const QByteArray &controller);
     bool canSendEvents() const;
     quint32 allocateTxid();
+    qint64 protocolNowMs() const;
+    void loadReviveState();
+    bool saveReviveState();
+    void clearReviveRequest();
+    void requestRevive();
+    void executeRevive();
+    void advanceReviveState();
+    void handleReviveApproval(quint8 sequence, quint32 txid,
+                              const QHostAddress &addr, quint16 port);
 
     QUdpSocket *m_uplink = nullptr;   // 发送到服务器 5005
     QUdpSocket *m_downlink = nullptr; // 监听 5006 接收服务器命令
@@ -93,6 +107,13 @@ private:
     bool m_formalMode = false;
     bool m_roundEnded = false;
     quint8 m_componentOnline = 0x3f;
+    qint64 m_protocolTestNowMs = -1;
+    qint64 m_deathDeadlineMs = -1;
+    quint8 m_nextRequestSequence = 0;
+    QByteArray m_reviveRequest; // Persisted 10B frame; F0 ACK never clears it.
+    bool m_reviveRequestPersisted = false;
+    qint64 m_reviveRetryAtMs = 0;
+    QHash<quint32, quint8> m_completedApprovals; // tx -> exact sequence, this epoch
     // V2 可靠事件：等待服务器 ACK
     struct PendingEvent {
         quint8 type = 0;

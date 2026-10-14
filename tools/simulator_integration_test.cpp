@@ -491,6 +491,8 @@ int main(int argc,char **argv)
         qInfo() << "Constructing server";
         auto *fieldBackend = new FakeFieldCameraBackend;
         MainWindow server(nullptr, fieldBackend); settle();
+        // This existing suite exercises the preserved legacy kill/SD mode.
+        child<QComboBox>(server,"ruleProfile")->setCurrentIndex(1); settle();
         {
             auto *camera = child<FieldCamera>(server,"fieldCameraController");
             auto *devices = child<QComboBox>(server,"fieldCameraDevice");
@@ -561,7 +563,7 @@ int main(int argc,char **argv)
             auto *left = child<QTabWidget>(server,"serverLeftSidebar");
             auto *right = child<QTabWidget>(server,"serverRightSidebar");
             auto *compact = child<QTabWidget>(server,"serverCompactWorkspace");
-            check(left->count()==1 && tabs->count()==2 && right->count()==1,"Dashboard tools missing");
+            check(left->count()==1 && tabs->count()==3 && right->count()==1,"Dashboard tools missing");
             check(server.findChild<QWidget *>(QStringLiteral("serverBottomDock")) == nullptr,
                   "Legacy bottom log dock is still present");
             check(child<QWidget>(server, "serverRightOperationsPage")
@@ -580,6 +582,9 @@ int main(int argc,char **argv)
                     for (int page=0;page<pane->count();++page) {
                         pane->setCurrentIndex(page); settle(40);
                         auto *workspace=pane->currentWidget();
+                        // The new referee pane deliberately scrolls; its narrow and clipboard layouts
+                        // are covered by RefereeEntryPanelTest, not the legacy all-buttons-in-view rule.
+                        if (workspace->objectName()==QStringLiteral("refereeEntryPanel")) continue;
                         const QRect bounds(QPoint(0,0),workspace->size());
                         for (auto *button : workspace->findChildren<QAbstractButton *>()) {
                             if (!button->isVisible() || button->width()==0) continue;
@@ -730,8 +735,10 @@ int main(int argc,char **argv)
         check(table->item(rowFor(*table,71),6)->text()==QStringLiteral("允许"),"COMBAT_END changed shooting permission");
         check(child<QCheckBox>(red,"simShoot")->isChecked(),"GAME_START did not enable shooting");
         invoke(red,"onSendHit");check(child<QSpinBox>(red,"simHp")->value()==280,"Hit damage must be 20 HP");
-        send(proto::makeSetHp(71,0,10997),10997);send(proto::makeSetHp(71,300,10998),10998);
-        check(child<QCheckBox>(red,"simAlive")->isChecked() && child<QCheckBox>(red,"simShoot")->isChecked(),"Positive SET_HP did not restore alive/shoot state");
+        send(proto::makeSetHp(71,0,10997),10997);send(proto::makeSetHp(71,300,10998),10998,1);
+        check(!child<QCheckBox>(red,"simAlive")->isChecked(),"Formal SET_HP bypassed revival approval");
+        send(proto::makeGameStart(71,10999),10999);
+        check(child<QCheckBox>(red,"simAlive")->isChecked() && child<QCheckBox>(red,"simShoot")->isChecked(),"New round did not restore alive/shoot state");
         send(proto::makeForcePowerOff(71,11001),11001);
         waitFor([&]{return table->item(rowFor(*table,71),7)->text()==QStringLiteral("已断电");},"Power off not displayed");
         send(proto::makeForcePowerOn(71,11002),11002);

@@ -32,6 +32,8 @@ class QVBoxLayout;
 class QWidget;
 class TickerMarqueeWidget;
 class MatchSummaryPanel;
+class ReviveIndicator;
+class CompetitionOverlay;
 
 // 独立的赛事输出窗口。视频帧作为底层画面，赛事状态作为透明叠加层显示。
 class BroadcastWindow : public QMainWindow
@@ -40,6 +42,7 @@ class BroadcastWindow : public QMainWindow
 
 public:
     explicit BroadcastWindow(QWidget *parent = nullptr);
+    ~BroadcastWindow() override;
 
     // Hosts such as the player client can place controls over the same
     // full-screen HUD without creating a second window.
@@ -77,6 +80,11 @@ public:
     void pauseMatch();
     void resetMatch();
     void setMatchState(int remainingSeconds, bool running, bool suddenDeath = false);
+    // Legacy/debug clock capacity; each instance defaults to the original 60 s.
+    void setClockDuration(int seconds);
+    // Authoritative formal-flow snapshot. This display never advances a phase,
+    // expires a clock, decides a winner, or starts the local match timer.
+    void setCompetitionState(const QJsonObject &state);
     bool suddenDeath() const { return m_suddenDeath; }
     void terminateMatch();
     // Ends the round with an externally decided result (e.g. MatchReferee).
@@ -146,6 +154,7 @@ private:
         QLabel *yellowCard = nullptr;
         QLabel *redCardIcon = nullptr;
         QLabel *yellowCardIcon = nullptr;
+        ReviveIndicator *reviveCount = nullptr;
         QLabel *damageNotice = nullptr;
         QGraphicsOpacityEffect *damageOpacity = nullptr;
         QPropertyAnimation *damageAnimation = nullptr;
@@ -169,6 +178,9 @@ private:
     void resetRound();
     void revealSummaryIfReady();
     void layoutSummaryPanel();
+    void leaveCompetitionPresentation();
+    void updateCompetitionPresentation();
+    void layoutCompetitionPresentation();
     void updateWinnerHighlight();
     void flashScore(QLabel *label);
     QString settlementTypeForScores() const;
@@ -237,7 +249,16 @@ private:
     QHash<quint8, int> m_yellowCards;
     QString m_activeSource = QStringLiteral("field");
     QString m_activeSourceTitle = QStringLiteral("全场视角");
+    int m_clockDuration = 60;
     int m_remainingSeconds = 60;
+    bool m_competitionMode = false;
+    QJsonObject m_competitionState;
+    QString m_competitionPhase;
+    QString m_competitionReason;
+    QString m_competitionSettlementKey;
+    // Formal-mode countdown / verdict / intermission presentation. Replaces the
+    // former phaseAnnouncement and competitionReason labels.
+    CompetitionOverlay *m_competitionOverlay = nullptr;
     int m_redScore = 0;
     int m_blueScore = 0;
     int m_onlineCount = 0;

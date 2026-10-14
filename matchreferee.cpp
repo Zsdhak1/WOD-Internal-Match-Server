@@ -17,6 +17,10 @@ QJsonObject teamJson(const MatchReferee::TeamStats &team, int dealt, int permill
     return {
         {QStringLiteral("hp"), team.hp},
         {QStringLiteral("maxHp"), team.maxHp},
+        {QStringLiteral("remainingRevives"), team.remainingRevives},
+        {QStringLiteral("revivePending"), team.revivePending},
+        {QStringLiteral("quotaKnown"), team.remainingRevives >= 0 && !team.revivePending},
+        {QStringLiteral("finalCurrentHp"), team.hp},
         {QStringLiteral("hpPermille"), permille},
         {QStringLiteral("damageDealt"), dealt},
         {QStringLiteral("damageTaken"), team.damageTaken},
@@ -43,6 +47,8 @@ void MatchReferee::reset()
     m_suddenFirstKillMs = -1;
     m_regulationEndedMs = -1;
     m_lastScoringKillMs = -1;
+    m_redExhaustedSinceMs = m_blueExhaustedSinceMs = -1;
+    m_awaitingNotice.clear();
     m_red = TeamStats();
     m_blue = TeamStats();
     m_robots.clear();
@@ -89,11 +95,30 @@ void MatchReferee::resume(qint64 nowMs)
 
 void MatchReferee::updateRobots(const QVector<RobotManager::RobotInfo> &robots, qint64 nowMs)
 {
-    if (m_phase == Phase::Idle || m_phase == Phase::Finished)
+    if (m_phase == Phase::Idle || m_phase == Phase::AwaitingDecision || m_phase == Phase::Finished)
         return;
     advanceClock(nowMs);
     applyRobots(robots, nowMs, m_phase == Phase::Running);
     recomputeTeams(nowMs);
+}
+
+void MatchReferee::setReviveState(quint8 team, int remaining, bool pending)
+{
+    if ((team != kRed && team != kBlue)
+        || m_phase == Phase::AwaitingDecision || m_phase == Phase::Finished)
+        return;
+    TeamStats &s = stats(team);
+    const int quota = remaining < 0 ? -1 : qMin(3, remaining);
+    const bool changed = s.remainingRevives != quota || s.revivePending != pending;
+    s.remainingRevives = quota;
+    s.revivePending = pending;
+    // A pending last revival is not a final exhausted life. A new state starts
+    // a fresh simultaneous window at the next timestamped update / tick, never
+    // at m_lastClockMs (which may be the preceding frame). Repeated authoritative
+    // per-frame updates with the same values must not perpetually reset it.
+    qint64 &since = team == kRed ? m_redExhaustedSinceMs : m_blueExhaustedSinceMs;
+    if (changed || pending || quota != 0 || s.hp != 0 || !s.online || !s.seenAlive)
+        since = -1;
 }
 
 void MatchReferee::recordCombatEvent(quint8 team, quint8 robotId, quint8 type, qint64 nowMs)
@@ -141,7 +166,8 @@ void MatchReferee::recordCombatEvent(quint8 team, quint8 robotId, quint8 type, q
 void MatchReferee::recordPenalty(quint8 team, bool redCard, qint64 nowMs)
 {
     if ((team != kRed && team != kBlue)
-        || (m_phase != Phase::Running && m_phase != Phase::Paused)) {
+        || (m_phase != Phase::Running && m_phase != Phase::Paused
+            && m_phase != Phase::AwaitingDecision)) {
         return;
     }
     advanceClock(nowMs);
@@ -189,10 +215,11 @@ void MatchReferee::timeExpired(qint64 nowMs)
         || m_suddenDeath || m_regulationEndedMs >= 0)
         return;
     advanceClock(nowMs);
-    // Keep the simultaneous-kill confirmation window at the buzzer. Scores
-    // arriving in that short window settle regulation, not a premature SD win.
     m_regulationEndedMs = elapsedMs(nowMs);
-    evaluate(nowMs, false);
+    // Formal resources are evaluated immediately at the buzzer. No post-buzzer
+    // STATUS / DEATH / quota update may rewrite this snapshot, even for a tie.
+    // Debug KillScore keeps its old boundary simultaneous-kill confirmation.
+    evaluate(nowMs, m_rules.scoringMode == ScoringMode::RemainingResources);
 }
 
 bool MatchReferee::tick(qint64 nowMs)
@@ -210,6 +237,8 @@ bool MatchReferee::tick(qint64 nowMs)
 
 void MatchReferee::setScores(int red, int blue)
 {
+    if (m_phase == Phase::AwaitingDecision || m_phase == Phase::Finished)
+        return;
     m_red.kills = qMax(0, red);
     m_blue.kills = qMax(0, blue);
 }
@@ -244,6 +273,8 @@ QString MatchReferee::liveNotice() const
 {
     if (m_phase == Phase::Finished)
         return m_verdict.reasonText;
+    if (m_phase == Phase::AwaitingDecision)
+        return m_awaitingNotice;
     if (m_phase == Phase::Paused)
         return QStringLiteral("比赛暂停");
     if (m_phase != Phase::Running)
@@ -257,7 +288,7 @@ QString MatchReferee::liveNotice() const
     for (const quint8 side : {kRed, kBlue}) {
         const TeamStats &s = team(side);
         if (!s.online) {
-            if (m_rules.offlineForfeitMs > 0) {
+            if (m_rules.scoringMode == ScoringMode::KillScore && m_rules.offlineForfeitMs > 0) {
                 // Whole seconds: the notice is mirrored to clients and should
                 // change at most once per second.
                 const qint64 left = qMax<qint64>(0, m_rules.offlineForfeitMs - s.offlineRunMs);
@@ -295,11 +326,17 @@ QJsonObject MatchReferee::summaryJson() const
     return {
         {QStringLiteral("valid"), m_verdict.valid},
         {QStringLiteral("suddenDeath"), m_suddenDeath},
+        {QStringLiteral("scoringMode"), m_rules.scoringMode == ScoringMode::RemainingResources
+                                           ? QStringLiteral("remaining_resources") : QStringLiteral("kill_score")},
+        {QStringLiteral("awaitingDecision"), awaitingDecision()},
+        {QStringLiteral("awaitingReason"), m_awaitingNotice},
+        {QStringLiteral("endingMethod"), m_verdict.endingMethod},
         {QStringLiteral("winner"), m_verdict.winner},
         {QStringLiteral("reason"), reasonKey(m_verdict.reason)},
         {QStringLiteral("reasonText"), m_verdict.reasonText},
         {QStringLiteral("settlement"), m_verdict.settlementType},
-        {QStringLiteral("durationMs"), double(m_verdict.valid ? m_verdict.elapsedMs : 0)},
+        {QStringLiteral("durationMs"), double(m_verdict.valid ? m_verdict.elapsedMs
+                                                              : awaitingDecision() ? m_elapsedBeforeResumeMs : 0)},
         {QStringLiteral("red"), teamJson(m_red, damageDealt(kRed), hpPermille(kRed))},
         {QStringLiteral("blue"), teamJson(m_blue, damageDealt(kBlue), hpPermille(kBlue))},
         {QStringLiteral("timeline"), timeline},
@@ -325,6 +362,9 @@ QString MatchReferee::reasonKey(Reason reason)
     case Reason::TimeDraw: return QStringLiteral("time_draw");
     case Reason::KillScore: return QStringLiteral("kill_score");
     case Reason::SuddenDeathKill: return QStringLiteral("sudden_death_kill");
+    case Reason::RemainingRevives: return QStringLiteral("remaining_revives");
+    case Reason::RemainingHp: return QStringLiteral("remaining_hp");
+    case Reason::ReviveExhausted: return QStringLiteral("revive_exhausted");
     case Reason::None: break;
     }
     return QString();
@@ -414,6 +454,8 @@ void MatchReferee::recomputeTeams(qint64 nowMs)
         bool online = false;
         bool alive = false;
         bool hpKnown = false;
+        bool anyHpUnknown = false;
+        bool allOnline = true;
         int hp = 0;
         int maxHp = 0;
         for (const RobotTrack &track : std::as_const(m_robots)) {
@@ -421,6 +463,8 @@ void MatchReferee::recomputeTeams(qint64 nowMs)
                 continue;
             any = true;
             online = online || track.online;
+            allOnline = allOnline && track.online;
+            anyHpUnknown = anyHpUnknown || track.hp < 0;
             alive = alive || !isDead(track);
             const int robotMax = maxHpFor(track.version);
             maxHp += robotMax;
@@ -433,9 +477,10 @@ void MatchReferee::recomputeTeams(qint64 nowMs)
         TeamStats &s = stats(side);
         const bool wasAlive = s.alive;
         const bool wasOnline = s.online;
-        s.online = online;
+        const bool formal = m_rules.scoringMode == ScoringMode::RemainingResources;
+        s.online = formal ? any && allOnline : online;
         s.alive = any && alive;
-        s.hp = hpKnown ? hp : -1;
+        s.hp = hpKnown && (!formal || !anyHpUnknown) ? hp : -1;
         s.maxHp = maxHp;
         if (online)
             s.offlineRunMs = 0;
@@ -458,8 +503,15 @@ void MatchReferee::recomputeTeams(qint64 nowMs)
             logEvent(nowMs, side, QStringLiteral("revive"),
                      QStringLiteral("%1复活").arg(sideName(side)));
         }
-        if (s.alive && online)
+        if (s.alive && s.online && (!formal || s.hp > 0))
             s.seenAlive = true;
+        if (formal) {
+            qint64 &since = side == kRed ? m_redExhaustedSinceMs : m_blueExhaustedSinceMs;
+            if (s.hp != 0 || !s.online || !s.seenAlive || s.revivePending || s.remainingRevives != 0)
+                since = -1;
+            else if (since < 0)
+                since = elapsedMs(nowMs);
+        }
     }
 }
 
@@ -552,8 +604,15 @@ bool MatchReferee::evaluate(qint64 nowMs, bool forceKnockout)
         return true;
     }
 
+    if (m_phase == Phase::AwaitingDecision)
+        return false;
     if (m_phase != Phase::Running && !forceKnockout)
         return false;
+
+    // Resource mode never falls through to debug kill scoring / sudden death,
+    // and stale/offline data is not an automatic loss.
+    if (m_rules.scoringMode == ScoringMode::RemainingResources)
+        return evaluateResources(nowMs);
 
     if (m_rules.offlineForfeitMs > 0) {
         const bool redGone = !m_red.online && m_red.offlineRunMs >= m_rules.offlineForfeitMs;
@@ -599,6 +658,118 @@ bool MatchReferee::evaluate(qint64 nowMs, bool forceKnockout)
         }
     }
 
+    return false;
+}
+
+QString MatchReferee::resourceUncertainty() const
+{
+    QStringList reasons;
+    for (const quint8 side : {kRed, kBlue}) {
+        const TeamStats &s = team(side);
+        if (!s.online)
+            reasons << QStringLiteral("%1离线，最终资源无法确认").arg(sideName(side));
+        if (s.hp < 0)
+            reasons << QStringLiteral("%1剩余血量未知").arg(sideName(side));
+        // Reliable DEATH may precede its zero-HP STATUS. Keep the last reported
+        // HP for statistics, but never compare it as an authoritative resource
+        // while the online death state contradicts it. This checks the current
+        // snapshot only; it does not solve old/late STATUS ordering in protocol.
+        if (s.online && !s.alive && s.hp > 0)
+            reasons << QStringLiteral("%1阵亡状态与剩余血量不一致，等待确认").arg(sideName(side));
+        if (s.remainingRevives < 0)
+            reasons << QStringLiteral("%1剩余复活次数未知").arg(sideName(side));
+        if (s.revivePending)
+            reasons << QStringLiteral("%1复活确认尚未完成").arg(sideName(side));
+    }
+    return reasons.join(QStringLiteral("；"));
+}
+
+void MatchReferee::awaitDecision(qint64 nowMs, const QString &notice)
+{
+    if (m_phase == Phase::AwaitingDecision || m_phase == Phase::Finished)
+        return;
+    const qint64 elapsed = elapsedMs(nowMs);
+    m_elapsedBeforeResumeMs = elapsed;
+    m_resumedAtMs = -1;
+    m_phase = Phase::AwaitingDecision;
+    m_suddenDeath = false;
+    m_awaitingNotice = notice;
+    sampleTimeline(elapsed, true);
+    logEvent(nowMs, 0, QStringLiteral("awaiting_decision"), notice);
+}
+
+bool MatchReferee::evaluateResources(qint64 nowMs)
+{
+    const auto exhausted = [](const TeamStats &s) {
+        return s.remainingRevives == 0 && !s.revivePending
+               && s.hp == 0 && s.online && s.seenAlive;
+    };
+    const bool redExhausted = exhausted(m_red);
+    const bool blueExhausted = exhausted(m_blue);
+    const bool timeUp = m_regulationEndedMs >= 0;
+
+    if (timeUp) {
+        // A reservation has already deducted remaining, but execution is still
+        // unknown. Do not interpret a pending last revival as used or unused.
+        if (m_red.revivePending || m_blue.revivePending) {
+            awaitDecision(nowMs, QStringLiteral("时间耗尽，复活确认尚未完成，等待裁判核实：%1")
+                                     .arg(resourceUncertainty()));
+            return false;
+        }
+        const QString uncertainty = resourceUncertainty();
+        if (!uncertainty.isEmpty()) {
+            awaitDecision(nowMs, QStringLiteral("时间耗尽，%1，等待裁判核实").arg(uncertainty));
+            return false;
+        }
+        if (m_red.remainingRevives == 0 && m_red.hp == 0
+            && m_blue.remainingRevives == 0 && m_blue.hp == 0) {
+            awaitDecision(nowMs, QStringLiteral("双方复活次数同时耗尽且血量归零，规则未定，等待裁判判定"));
+            return false;
+        }
+        if (m_red.remainingRevives != m_blue.remainingRevives) {
+            decide(m_red.remainingRevives > m_blue.remainingRevives ? kRed : kBlue,
+                   Reason::RemainingRevives, nowMs);
+            return true;
+        }
+        if (m_red.hp != m_blue.hp) {
+            decide(m_red.hp > m_blue.hp ? kRed : kBlue, Reason::RemainingHp, nowMs);
+            return true;
+        }
+        awaitDecision(nowMs, QStringLiteral("时间耗尽，双方剩余复活次数相同（%1次）且剩余血量相同（%2 HP），规则未定，等待裁判判定")
+                                 .arg(m_red.remainingRevives).arg(m_red.hp));
+        return false;
+    }
+
+    // Both known resource sets are empty: no automatic winner even if one
+    // robot was never observed alive (seenAlive only gates single-side loss).
+    const bool bothEmpty = m_red.remainingRevives == 0 && !m_red.revivePending
+                           && m_red.hp == 0 && m_red.online
+                           && m_blue.remainingRevives == 0 && !m_blue.revivePending
+                           && m_blue.hp == 0 && m_blue.online;
+    if (bothEmpty) {
+        awaitDecision(nowMs, QStringLiteral("双方复活次数同时耗尽且血量归零，规则未定，等待裁判判定"));
+        return false;
+    }
+    const qint64 elapsed = elapsedMs(nowMs);
+    for (const quint8 side : {kRed, kBlue}) {
+        qint64 &since = side == kRed ? m_redExhaustedSinceMs : m_blueExhaustedSinceMs;
+        if (!(side == kRed ? redExhausted : blueExhausted)) {
+            since = -1;
+            continue;
+        }
+        if (since < 0)
+            since = elapsed;
+        if (elapsed - since < qMax(0, m_rules.knockoutConfirmMs))
+            continue;
+        const QString uncertainty = resourceUncertainty();
+        if (!uncertainty.isEmpty()) {
+            awaitDecision(nowMs, QStringLiteral("%1复活次数耗尽且血量归零；%2，等待裁判核实")
+                                     .arg(sideName(side), uncertainty));
+            return false;
+        }
+        decide(opponent(side), Reason::ReviveExhausted, nowMs);
+        return true;
+    }
     return false;
 }
 
@@ -666,6 +837,17 @@ void MatchReferee::decide(quint8 winner, Reason reason, qint64 nowMs, const QStr
         text = QStringLiteral("SUDDEN DEATH，%1击杀%2获胜（%3 : %4）")
                    .arg(sideName(winner), sideName(loser)).arg(m_red.kills).arg(m_blue.kills);
         break;
+    case Reason::RemainingRevives:
+        text = QStringLiteral("时间耗尽，按剩余复活次数判定：红方%1次，蓝方%2次，%3获胜")
+                   .arg(m_red.remainingRevives).arg(m_blue.remainingRevives).arg(sideName(winner));
+        break;
+    case Reason::RemainingHp:
+        text = QStringLiteral("时间耗尽，剩余复活次数相同（%1次），按剩余血量判定：红方%2 HP，蓝方%3 HP，%4获胜")
+                   .arg(m_red.remainingRevives).arg(m_red.hp).arg(m_blue.hp).arg(sideName(winner));
+        break;
+    case Reason::ReviveExhausted:
+        text = QStringLiteral("%1复活次数耗尽且血量归零，%2获胜").arg(sideName(loser), sideName(winner));
+        break;
     case Reason::None:
         break;
     }
@@ -675,6 +857,33 @@ void MatchReferee::decide(quint8 winner, Reason reason, qint64 nowMs, const QStr
     m_verdict.valid = true;
     m_verdict.winner = winner;
     m_verdict.reason = reason;
+    switch (reason) {
+    case Reason::RemainingRevives:
+    case Reason::RemainingHp:
+    case Reason::KillScore:
+    case Reason::FewerDeaths:
+    case Reason::HpRatio:
+    case Reason::DamageDealt:
+    case Reason::FewerPenalties:
+    case Reason::TimeDraw:
+        m_verdict.endingMethod = QStringLiteral("time_decision");
+        break;
+    case Reason::ReviveExhausted:
+        m_verdict.endingMethod = QStringLiteral("revive_exhausted");
+        break;
+    case Reason::RedCard:
+    case Reason::YellowCardLimit:
+    case Reason::DoubleDisqualification:
+    case Reason::Forfeit:
+        m_verdict.endingMethod = QStringLiteral("violation");
+        break;
+    case Reason::Terminated:
+        m_verdict.endingMethod = QStringLiteral("safety_stop");
+        break;
+    default:
+        m_verdict.endingMethod = QStringLiteral("normal");
+        break;
+    }
     m_verdict.reasonText = text;
     m_verdict.elapsedMs = elapsed;
     m_verdict.settlementType = reason == Reason::Terminated ? QStringLiteral("termination")

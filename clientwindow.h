@@ -6,6 +6,7 @@
 
 #include <QColor>
 #include <QPair>
+#include <QSet>
 #include <QVector>
 
 class QCamera;
@@ -70,6 +71,8 @@ private:
     void handleMessage(const QJsonObject &message);
     void handleRobotSnapshot(const QJsonObject &message);
     void handleMatchState(const QJsonObject &message);
+    bool acceptCompetitionSnapshot(const QJsonObject &message);
+    void resetCompetitionOrdering();
     void resetCombatFeedback(bool resetRoundState = false);
     void updateCombatFeedback(const QVector<RobotManager::RobotInfo> &robots);
     void layoutCombatOverlay();
@@ -126,6 +129,13 @@ private:
     playercombat::HpTracker m_opponentHpTracker;
     bool m_combatRoundRunning = false;
     int m_combatRemainingSeconds = -1;
+    bool m_receivedCompetitionState = false;
+    QString m_competitionMatchId;
+    QString m_competitionRoundId;
+    qint64 m_competitionRevision = -1;
+    int m_competitionRoundIndex = 0;
+    QSet<QString> m_retiredCompetitionMatches;
+    QSet<QString> m_retiredCompetitionRounds;
 
     QWidget *m_registrationOverlay = nullptr;
     QGridLayout *m_registrationTiles = nullptr;

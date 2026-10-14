@@ -776,6 +776,10 @@ void ClientWindow::onLoginClicked()
 
 void ClientWindow::onSocketConnected()
 {
+    // Each successful TCP connection is a new server generation. Old ids and
+    // revisions cannot fence out a server restart or a reconnect snapshot.
+    resetCompetitionOrdering();
+    m_readBuffer.clear();
     if (!m_loginInProgress || m_registered)
         return;
 
@@ -1102,8 +1106,77 @@ void ClientWindow::updateCombatFeedback(const QVector<RobotManager::RobotInfo> &
     // yellow-card deductions cannot reliably be separated from real damage.
 }
 
+void ClientWindow::resetCompetitionOrdering()
+{
+    m_receivedCompetitionState = false;
+    m_competitionMatchId.clear();
+    m_competitionRoundId.clear();
+    m_competitionRevision = -1;
+    m_competitionRoundIndex = 0;
+    m_retiredCompetitionMatches.clear();
+    m_retiredCompetitionRounds.clear();
+}
+
+bool ClientWindow::acceptCompetitionSnapshot(const QJsonObject &message)
+{
+    const QString match = message.value(QStringLiteral("matchId")).toString();
+    const QString round = message.value(QStringLiteral("roundId")).toString();
+    const qint64 revision = message.value(QStringLiteral("stateRevision")).toVariant().toLongLong();
+    const int roundIndex = message.value(QStringLiteral("roundIndex")).toInt(1);
+    if (m_receivedCompetitionState && match != m_competitionMatchId) {
+        if (m_retiredCompetitionMatches.contains(match))
+            return false;
+        // Revision counters only have meaning within the same match. A new
+        // match (including a server reset) is allowed to start at revision 0.
+        m_retiredCompetitionMatches.insert(m_competitionMatchId);
+        m_retiredCompetitionRounds.clear();
+        m_competitionRevision = -1;
+        m_competitionRoundIndex = 0;
+        m_competitionRoundId.clear();
+    } else if (m_receivedCompetitionState) {
+        if (revision < m_competitionRevision || roundIndex < m_competitionRoundIndex)
+            return false;
+        if (round != m_competitionRoundId && m_retiredCompetitionRounds.contains(round))
+            return false;
+    }
+    if (round != m_competitionRoundId && !m_competitionRoundId.isEmpty())
+        m_retiredCompetitionRounds.insert(m_competitionRoundId);
+    m_receivedCompetitionState = true;
+    m_competitionMatchId = match;
+    m_competitionRoundId = round;
+    m_competitionRevision = revision;
+    m_competitionRoundIndex = roundIndex;
+    return true;
+}
+
 void ClientWindow::handleMatchState(const QJsonObject &message)
 {
+    if (message.value(QStringLiteral("scoringRule")).toString()
+        == QStringLiteral("remaining_resources")) {
+        const QString previousMatch = m_competitionMatchId;
+        const QString previousRound = m_competitionRoundId;
+        if (!acceptCompetitionSnapshot(message))
+            return;
+        const bool active = message.value(QStringLiteral("phase")).toString()
+                            == QStringLiteral("running");
+        if (!active || active != m_combatRoundRunning
+            || previousMatch != m_competitionMatchId || previousRound != m_competitionRoundId)
+            resetCombatFeedback();
+        m_combatRoundRunning = active;
+        m_combatRemainingSeconds = message.value(QStringLiteral("remainingSeconds")).toInt();
+        QJsonObject localState = message;
+        const QString settlement = message.value(QStringLiteral("settlement")).toString();
+        if ((settlement == QStringLiteral("redwin") && m_selectedTeam == kBlueTeam)
+            || (settlement == QStringLiteral("bluewin") && m_selectedTeam == kRedTeam))
+            localState.insert(QStringLiteral("settlement"), QStringLiteral("defeated"));
+        setCompetitionState(localState);
+        m_remoteSummaryExpanded = false;
+        return;
+    }
+    // A late legacy packet cannot replace an already accepted formal match on
+    // this TCP generation. Reconnecting to a legacy server clears this fence.
+    if (m_receivedCompetitionState)
+        return;
     const int seconds = message.value(QStringLiteral("remainingSeconds")).toInt(60);
     const bool active = message.value(QStringLiteral("running")).toBool(false)
                         && !message.value(QStringLiteral("ended")).toBool(false)

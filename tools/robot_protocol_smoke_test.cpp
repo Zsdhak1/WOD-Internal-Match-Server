@@ -91,6 +91,42 @@ int main(int argc, char *argv[])
     if (proto::parseDatagram(malformed, ignored))
         return fail(QStringLiteral("错误长度帧未被拒绝"));
 
+    const QByteArray reviveRequest = proto::makeReviveRequest(7, 0xa5, 0x12345678u);
+    const QByteArray reviveApprove = proto::makeReviveApprove(7, 0xa5, 0x12345678u);
+    if (reviveRequest != QByteArray::fromHex("5452020d07a578563412")
+        || reviveApprove != QByteArray::fromHex("5452028907a578563412")
+        || !proto::parseDatagram(reviveRequest, frame) || frame.requestSequence != 0xa5
+        || frame.transactionId != 0x12345678u || frame.fromStatus
+        || !proto::parseDatagram(reviveApprove, frame)
+        || !proto::isDownlinkCommand(frame.type)
+        || proto::isReliableEvent(proto::TypeReviveRequest))
+        return fail(QStringLiteral("10B revive request/approval golden bytes or parsing failed"));
+    for (const QByteArray &valid : {reviveRequest, reviveApprove}) {
+        QByteArray extra = valid; extra.append(char(0));
+        QByteArray wrongVersion = valid; wrongVersion[2] = char(proto::kVersion1);
+        if (proto::parseDatagram(valid.left(9), frame)
+            || proto::parseDatagram(extra, frame) || proto::parseDatagram(wrongVersion, frame))
+            return fail(QStringLiteral("Revive frames must be strictly V2 10B"));
+    }
+    int requests = 0;
+    bool requestFieldsCorrect = true;
+    QObject::connect(&manager, &RobotManager::reviveRequested, &application,
+                     [&](quint8 id, quint8 seq, quint32 tx, quint32 ip, quint16 port) {
+        ++requests;
+        requestFieldsCorrect = requestFieldsCorrect && id == 7 && seq == 0xa5
+            && tx == 0x12345678u && ip == sender.toIPv4Address() && port == 51000;
+    });
+    manager.markTransactionProcessed(7, proto::TypeDeath, 0x12345678u);
+    manager.markTransactionProcessed(7, proto::TypeReviveRequest, 0x12345678u);
+    const auto beforeRequest = manager.robots().first();
+    manager.handleDatagram(reviveRequest, sender, 51000);
+    manager.handleDatagram(reviveRequest, sender, 51000);
+    const auto afterRequest = manager.robots().first();
+    if (requests != 2 || !requestFieldsCorrect || beforeRequest.hp != afterRequest.hp
+        || beforeRequest.alive != afterRequest.alive
+        || beforeRequest.lastSeenMs != afterRequest.lastSeenMs)
+        return fail(QStringLiteral("Repeated requests must bypass event dedup and not mutate telemetry"));
+
     qInfo().noquote() << QStringLiteral("Robot protocol smoke test passed");
     return 0;
 }

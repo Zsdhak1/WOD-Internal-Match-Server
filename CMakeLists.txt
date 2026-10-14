@@ -6,6 +6,11 @@ project(Scompetition VERSION 0.2.0 LANGUAGES CXX)
 # ASCII-safe and compile UTF-8 explicitly so regional settings cannot alter builds.
 if(MSVC)
     add_compile_options(/utf-8)
+    if(DEFINED ENV{SCOMP_MSVC_INCLUDES_PREFIX})
+        # The build wrapper measures the actual UTF-8 prefix; VSLANG is not proof
+        # that an English compiler UI language pack is installed.
+        set(CMAKE_CL_SHOWINCLUDES_PREFIX "$ENV{SCOMP_MSVC_INCLUDES_PREFIX}")
+    endif()
 endif()
 
 # Development caches keep stable paths; exported artifacts carry a version and
@@ -56,6 +61,10 @@ set(PROJECT_SOURCES
         applogging.h
         mainwindow.cpp
         mainwindow.h
+        competitionflow.cpp
+        competitionflow.h
+        refereeentrypanel.cpp
+        refereeentrypanel.h
         fieldcamera.cpp
         fieldcamera.h
         checkinmodel.cpp
@@ -65,6 +74,9 @@ set(PROJECT_SOURCES
         responsiveui.h
         broadcastwindow.cpp
         broadcastwindow.h
+        competitionoverlay.cpp
+        competitionoverlay.h
+        reviveindicator.cpp
         videocanvas.cpp
         videocanvas.h
         matchprotocol.h
@@ -122,6 +134,9 @@ add_executable(ScompetitionClient
         responsiveui.h
         broadcastwindow.cpp
         broadcastwindow.h
+        competitionoverlay.cpp
+        competitionoverlay.h
+        reviveindicator.cpp
         videocanvas.cpp
         videocanvas.h
         robotmanager.cpp
@@ -215,11 +230,14 @@ add_executable(SimulatorIntegrationTest
     tools/simulator_integration_test.cpp
     simulatorwindow.cpp simulatorwindow.h
     mainwindow.cpp mainwindow.h
+    competitionflow.cpp competitionflow.h
+    refereeentrypanel.cpp refereeentrypanel.h
     fieldcamera.cpp fieldcamera.h
     checkinmodel.cpp checkinmodel.h checkinpanel.cpp checkinpanel.h
     clientwindow.cpp clientwindow.h
     playercombatoverlay.cpp playercombatoverlay.h
     broadcastwindow.cpp broadcastwindow.h huddigitslabel.h broadcast_assets.qrc
+    competitionoverlay.cpp competitionoverlay.h reviveindicator.cpp
     videocanvas.cpp videocanvas.h
     robotmanager.cpp robotmanager.h
     robotcommander.cpp robotcommander.h
@@ -246,12 +264,44 @@ add_executable(ClientLoginUiTest
     tools/client_login_ui_test.cpp
     clientwindow.cpp clientwindow.h playercombatoverlay.cpp playercombatoverlay.h
     broadcastwindow.cpp broadcastwindow.h huddigitslabel.h broadcast_assets.qrc
+    competitionoverlay.cpp competitionoverlay.h reviveindicator.cpp
     videocanvas.cpp videocanvas.h robotmanager.cpp robotmanager.h)
 target_include_directories(ClientLoginUiTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ClientLoginUiTest PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(CompetitionFlowTest tools/competition_flow_test.cpp competitionflow.cpp competitionflow.h)
+target_include_directories(CompetitionFlowTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(CompetitionFlowTest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+add_executable(ReviveProtocolTest tools/revive_protocol_test.cpp
+    robotmanager.cpp robotmanager.h robotcommander.cpp robotcommander.h
+    simulatorwindow.cpp simulatorwindow.h protocol.h responsiveui.h)
+target_include_directories(ReviveProtocolTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ReviveProtocolTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network)
+add_executable(RefereeEntryPanelTest tools/referee_entry_panel_test.cpp refereeentrypanel.cpp refereeentrypanel.h)
+target_include_directories(RefereeEntryPanelTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(RefereeEntryPanelTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+add_executable(CompetitionUiTest tools/competition_ui_test.cpp
+    broadcastwindow.cpp broadcastwindow.h videocanvas.cpp videocanvas.h
+    competitionoverlay.cpp competitionoverlay.h reviveindicator.cpp
+    playercombatoverlay.cpp playercombatoverlay.h huddigitslabel.h broadcast_assets.qrc)
+target_include_directories(CompetitionUiTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(CompetitionUiTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+get_target_property(_competition_integration_sources SimulatorIntegrationTest SOURCES)
+list(REMOVE_ITEM _competition_integration_sources tools/simulator_integration_test.cpp)
+add_executable(CompetitionIntegrationTest tools/competition_integration_test.cpp ${_competition_integration_sources})
+target_include_directories(CompetitionIntegrationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(CompetitionIntegrationTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+
 enable_testing()
+add_test(NAME competition_flow COMMAND CompetitionFlowTest)
+add_test(NAME revive_protocol COMMAND ReviveProtocolTest)
+add_test(NAME referee_entry_panel COMMAND RefereeEntryPanelTest)
+add_test(NAME competition_ui COMMAND CompetitionUiTest)
+add_test(NAME competition_integration COMMAND CompetitionIntegrationTest)
+set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60 RUN_SERIAL TRUE)
@@ -291,7 +341,8 @@ install(FILES "${DEFAULT_BROADCAST_LAYOUT_FILE}"
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/docs/SERVER_USB_CAMERA.md"
-              "${CMAKE_CURRENT_SOURCE_DIR}/docs/CHECKIN_MODE.md" DESTINATION docs)
+              "${CMAKE_CURRENT_SOURCE_DIR}/docs/CHECKIN_MODE.md"
+              "${CMAKE_CURRENT_SOURCE_DIR}/docs/FORMAL_MATCH_FLOW.md" DESTINATION docs)
 
 if(WIN32)
     set(FFMPEG_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/ffmpeg")
