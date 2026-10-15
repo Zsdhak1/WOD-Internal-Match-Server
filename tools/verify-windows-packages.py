@@ -1,19 +1,16 @@
-"""Verify all three standalone Windows x64 packages with no developer PATH.
-Runs dependency-only GUI probes and an isolated HTTP fixture; never starts a
-real match or uses a real results DB. stdout of web service is deliberately
-not captured because it prints a temporary generated admin password.
+"""Verify the standalone Windows x64 Server and Client packages with no developer PATH.
+Runs dependency-only GUI probes; never starts a real match. results-web is
+deprecated and no longer packaged.
 """
 import argparse
-import json
 import os
 from pathlib import Path
-import socket
 import struct
 import subprocess
 import tempfile
-import time
-from urllib.request import urlopen
 import zipfile
+
+COMPONENTS = ('Server', 'Client')
 
 
 def x64(path):
@@ -34,8 +31,8 @@ def verify(root):
             environment.pop(key)
     environment['PYTHONUTF8'] = '1'
     assert os.name == 'nt' and struct.calcsize('P') == 8, '64-bit Windows Python required'
-    folders = {name: next(root.glob(f'Scompetition-{name}_*')) for name in ('Server', 'Client', 'ResultsWeb')}
-    assert len(list(root.iterdir())) == 3, 'Unexpected content in split release staging'
+    folders = {name: next(root.glob(f'Scompetition-{name}_*')) for name in COMPONENTS}
+    assert len(list(root.iterdir())) == len(COMPONENTS), 'Unexpected content in split release staging'
     for name, exe in [('Server', 'Scompetition.exe'), ('Client', 'ScompetitionClient.exe')]:
         folder = folders[name]
         for required in (exe, 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Widgets.dll', 'Qt6Network.dll',
@@ -53,53 +50,13 @@ def verify(root):
         subprocess.run([str(folder/'tools/ffmpeg/ffmpeg.exe'), '-version'], cwd=folder,
                        env=environment, check=True, timeout=30,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    folder = folders['ResultsWeb']
-    x64(folder/'ResultsWeb.exe')
-    assert (folder/'_internal/static/assets/arena-background.jpg').is_file()
-    assert (folder/'_internal/static/assets/arena-corners.jpg').is_file()
-    subprocess.run([str(folder/'ResultsWeb.exe'), '--help'], cwd=folder, env=environment,
-                   check=True, timeout=30, stdout=subprocess.DEVNULL)
-    with tempfile.TemporaryDirectory(prefix='scomp-package-qa-') as temp:
-        with socket.socket() as sock:
-            sock.bind(('127.0.0.1', 0))
-            port = sock.getsockname()[1]
-        process = subprocess.Popen([str(folder/'ResultsWeb.exe'), '--port', str(port),
-                                    '--db', str(Path(temp)/'test.sqlite3')],
-                                   cwd=folder, env=environment,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            deadline = time.monotonic()+30
-            while True:
-                if process.poll() is not None:
-                    raise AssertionError('Frozen HTTP service exited before startup')
-                try:
-                    with urlopen(f'http://127.0.0.1:{port}/api/public', timeout=1) as response:
-                        payload = json.load(response)
-                    assert 'standings' in payload
-                    break
-                except (OSError, ValueError):
-                    if time.monotonic() >= deadline:
-                        raise AssertionError('Frozen HTTP service failed startup')
-                    time.sleep(.1)
-            for endpoint in ('/', '/admin', '/display-clean.css', '/display.js', '/admin.js',
-                             '/assets/arena-background.jpg', '/assets/arena-corners.jpg'):
-                with urlopen(f'http://127.0.0.1:{port}{endpoint}', timeout=5) as response:
-                    assert response.status == 200 and response.read(), endpoint
-        finally:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
     for folder in folders.values():
         for file in folder.rglob('*'):
             if not file.is_file():
                 continue
             assert not any(part in ('data', '__pycache__', '.learnings', 'logs') for part in file.parts), file
             assert not any(s in file.name for s in ('.sqlite', '.pyc', '.dmp')), file
-    print('PASS: three x64 packages; Qt/FFmpeg start with sanitized PATH; frozen HTTP/assets serve; no runtime data.')
+    print('PASS: Server/Client x64 packages; Qt/FFmpeg start with sanitized PATH; no runtime data.')
 
 
 def main():
@@ -109,7 +66,7 @@ def main():
     args = parser.parse_args()
     verify(args.directory.resolve())
     if args.archives:
-        assert len(args.archives) == 3
+        assert len(args.archives) == len(COMPONENTS)
         with tempfile.TemporaryDirectory(prefix='scomp-extracted-qa-') as temp:
             extracted = Path(temp)
             for archive in args.archives:
@@ -122,7 +79,7 @@ def main():
                     z.extractall(extracted)
             # Re-run from extracted ZIPs, not just the original staging tree.
             verify(extracted)
-        print('PASS: all three ZIP archives, manifest presence and extracted startup.')
+        print('PASS: Server/Client ZIP archives, manifest presence and extracted startup.')
 
 
 if __name__ == '__main__':

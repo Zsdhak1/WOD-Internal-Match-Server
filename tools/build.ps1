@@ -52,7 +52,7 @@ Write-Host "Version: $version | Build session (UTC): $timestamp"
 Write-Host "Cache: $BuildDirectory"
 Write-Host "Export: $release"
 if ($SplitPackages) {
-    Write-Host "Packages: $packageDirectory\Scompetition-{Server,Client,ResultsWeb}_$buildId.zip"
+    Write-Host "Packages: $packageDirectory\Scompetition-{Server,Client}_$buildId.zip"
 } else {
     Write-Host "Package: $packageDirectory\WOD-Internal-Match-Server_$buildId.zip"
 }
@@ -112,8 +112,10 @@ function Invoke-Checked([string]$program, [string[]]$arguments) {
 }
 $configureArguments = @('-S', $source, '-B', $BuildDirectory, '-G', 'Ninja', "-DCMAKE_BUILD_TYPE=$Configuration", "-DCMAKE_PREFIX_PATH=$QtDirectory", "-DSCOMP_BUILD_TIMESTAMP=$timestamp")
 if ($WindowsSdkEnvironment) {
-    $configureArguments += "-DCMAKE_RC_COMPILER=$((Get-Command rc.exe -ErrorAction Stop).Source)"
-    $configureArguments += "-DCMAKE_MT=$((Get-Command mt.exe -ErrorAction Stop).Source)"
+    # Forward slashes: CMake writes these verbatim into CMakeRCCompiler.cmake on a
+    # fresh cache, where backslashes would be parsed as escapes (e.g. '\P').
+    $configureArguments += "-DCMAKE_RC_COMPILER=$((Get-Command rc.exe -ErrorAction Stop).Source.Replace('\', '/'))"
+    $configureArguments += "-DCMAKE_MT=$((Get-Command mt.exe -ErrorAction Stop).Source.Replace('\', '/'))"
 }
 Invoke-Checked $cmake $configureArguments
 if ($ConfigureOnly) { return }

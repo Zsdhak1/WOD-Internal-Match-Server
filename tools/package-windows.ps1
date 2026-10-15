@@ -29,7 +29,9 @@ function Run([string]$program, [string[]]$arguments) {
 # Explicit app-local CRT avoids requiring VC++ redist installation on the target.
 $redist = Join-Path $VisualStudioDirectory 'VC\Redist\MSVC'
 $crt = Get-ChildItem -LiteralPath $redist -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_.Name } -Descending |
-    ForEach-Object { Join-Path $_.FullName 'x64\Microsoft.VC143.CRT' } |
+    # VS 2022 ships Microsoft.VC143.CRT, VS 2026 ships Microsoft.VC145.CRT.
+    ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -ExpandProperty FullName } |
     Where-Object { Test-Path -LiteralPath (Join-Path $_ 'msvcp140.dll') } | Select-Object -First 1
 if (-not $crt) { throw 'MSVC x64 app-local runtime was not found.' }
 function Copy-Crt([string]$destination) {
@@ -58,25 +60,7 @@ foreach ($component in $names.Keys) {
     Write-Utf8 (Join-Path $folder 'Start.cmd') "@echo off`r`ncd /d `"%~dp0`"`r`nstart `"`" `"%~dp0$exe`"`r`n"
     Write-Utf8 (Join-Path $folder 'START-HERE.txt') "Windows 10/11 x64 portable $component. Extract the complete ZIP, then run Start.cmd or $exe.`r`nQt/plugins, MSVC CRT, static FFmpeg and settlement assets are bundled. No Qt/Python install required.`r`nCurrent kill-score/SD rules are not the official BO3 model. See README and docs.`r`n"
 }
-# Build a console onedir service: Python/sqlite/hashlib/stdlib are bundled, no pip
-# or Python installation is needed on the receiving Windows machine.
-$web = Join-Path $source 'results-web'
-$pyWork = Join-Path $source "build\tools\pyinstaller-$buildId"
-$pyDist = Join-Path $pyWork 'dist'
-Run $PythonExecutable @('-m', 'PyInstaller', '--version')
-Run $PythonExecutable @('-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--console', '--name', 'ResultsWeb', '--distpath', $pyDist, '--workpath', (Join-Path $pyWork 'work'), '--specpath', $pyWork, '--add-data', "$web\static;static", (Join-Path $web 'server.py'))
-$webFolder = Join-Path $export "Scompetition-ResultsWeb_$buildId"
-Copy-Item -LiteralPath (Join-Path $pyDist 'ResultsWeb') -Destination $webFolder -Recurse
-Copy-Crt $webFolder
-Copy-Item -LiteralPath (Join-Path $web 'templates') -Destination $webFolder -Recurse
-Copy-Item -LiteralPath (Join-Path $web 'README.md') -Destination $webFolder
-New-Item -ItemType Directory -Path (Join-Path $webFolder 'docs') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $source 'docs\COMPETITION_RULE_COMPLIANCE.md'), (Join-Path $source 'docs\GITHUB_RELEASE.md') -Destination (Join-Path $webFolder 'docs')
-Copy-Item -LiteralPath (Join-Path $BuildDirectory 'build-info.json') -Destination $webFolder
-$webReadme = Get-Content -LiteralPath (Join-Path $webFolder 'README.md') -Raw
-Write-Utf8 (Join-Path $webFolder 'README.md') ($webReadme.Replace('<../docs/COMPETITION_RULE_COMPLIANCE.md>', '<docs/COMPETITION_RULE_COMPLIANCE.md>'))
-Write-Utf8 (Join-Path $webFolder 'Start.cmd') "@echo off`r`ncd /d `"%~dp0`"`r`nchcp 65001 >nul`r`nset PYTHONUTF8=1`r`n`"%~dp0ResultsWeb.exe`" %*`r`npause`r`n"
-Write-Utf8 (Join-Path $webFolder 'START-HERE.txt') "Windows 10/11 x64: extract the complete ZIP, then run Start.cmd (no Python/pip needed).`r`nDisplay: http://127.0.0.1:8765/   Admin: http://127.0.0.1:8765/admin`r`nFirst-run password is printed in this console; save it. Keep the console open.`r`nPrivate data is created in data/ beside ResultsWeb.exe. Do not publish this folder.`r`nLAN example: Start.cmd --host 0.0.0.0 --allowed-host 192.168.1.10`r`nReplace the IP with this PC's LAN IP; use only a trusted LAN. Never expose HTTP passwords publicly.`r`nDo not mix with the DSH GUI; uses independent port 8765. No automatic Qt synchronization.`r`n"
+# results-web is deprecated: only the Server and Client desktop packages are built.
 Run $PythonExecutable @((Join-Path $PSScriptRoot 'verify-windows-packages.py'), '--directory', $export)
 foreach ($folder in Get-ChildItem -LiteralPath $export -Directory) {
     $manifest = [ordered]@{ component = $folder.Name; platform = 'win64'; configuration = 'Release'; build = $info; files = @() }
@@ -97,4 +81,4 @@ $checksum = Join-Path $packages "SHA256SUMS_$buildId.txt"
 Write-Utf8 $checksum (($archives | ForEach-Object { "$($_.sha256.ToLower())  $([IO.Path]::GetFileName($_.path))" }) -join "`n")
 $releaseIndex = [ordered]@{ schemaVersion = 1; buildId = $buildId; exportDirectory = $export; packages = $archives; checksums = $checksum; completedAtUtc = [datetime]::UtcNow.ToString('o') }
 Write-Utf8 (Join-Path $source 'build\latest-split.json') ($releaseIndex | ConvertTo-Json -Depth 6)
-Write-Host "Completed three standalone Windows x64 packages: $buildId"
+Write-Host "Completed Server and Client standalone Windows x64 packages: $buildId"
