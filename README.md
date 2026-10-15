@@ -1,109 +1,99 @@
 # WOD-Internal-Match-Server
 
-基于 Qt/C++ 的校内赛事服务端、选手端、车载端模拟器和赛事转播控制台，当前面向 **1v1 步兵机器人对抗赛**。
+校内 1v1 步兵机器人对抗赛的比赛系统，基于 Qt 6 / C++。包含赛事服务端、选手端、车载端模拟器和转播画面。
 
-## 当前规则与适用范围
-
-**默认新增正式 BO3 规则模式**：每局前 5 秒倒计时、双方设备确认后 180 秒小局、每小局每方 3 次复活、120 秒局间准备、先赢 2 局结束；到时先比较剩余复活次数，再比较剩余 HP。旧 60 秒击杀 +1 / SUDDEN DEATH 模式保留在明确的“旧调试”配置中。正式模式不提供技术暂停，数据相同、同时耗尽或未知资源时等待裁判，不擅自加时。操作、复活协议和验证边界见 [正式比赛流程](<docs/FORMAL_MATCH_FLOW.md>)；旧审查记录见 [规则符合性审查](<docs/COMPETITION_RULE_COMPLIANCE.md>)。小组获胜点总榜、自动晋级及真实设备安全验收不在本次实现范围；命令 ACK 或模拟器回归不等于实车安全和全手册合规。
-
-独立 results-web 公开成绩页已弃用，本次不修改。裁判在 Qt 服务端“裁判录入辅助”页查看并复制每小局的胜方、双方剩余 HP/复活次数、结束方式和判定原因，然后填入外部成绩系统；不自动上传，也不改外部系统。旧网页说明仍保留在 [results-web 使用说明](<results-web/README.md>)。
-
-## 项目功能
-
-- 接收并解析机器人通过 UDP 上报的状态和比赛事件
-- 按 `(team, robotId)` 识别机器人，不使用发送 IP 作为机器人身份
-- 机器人在线、血量、热量、存活状态和射击权限监控
-- 死亡、复活、受击、攻击、允许射击和禁止射击事件日志
-- 独立的全屏无边框转播输出窗口和赛事控制台窗口
-- 正式模式：5 秒开赛倒计时、设备确认、180 秒小局、120 秒局间准备及 BO3；仅旧调试模式保留 60 秒计时与界面暂停
-- 比赛画面使用无外框的紧凑顶部 HUD：白色队名、蜂窝纹理红蓝血条和条内血量数字，与中央倒计时对齐
-- 不在比赛画面显示在线、存活、射击、热量、功率、链路等监控文字；相关数据保留在赛事控制台，判罚和赛后数据仍可显示
-- 机器人血量下降时保留血条伤害缓冲效果，不在顶部悬浮额外伤害文字
-- 红方血条镜像显示，并从右向左填充
-- 中央计时 / 左右比分底板使用单张合并透明素材，整体缩放；文字保持动态，左右信息面板默认贴合中央宽度
-- 倒计时和比分采用内置原创棱角数码字形（矢量绘制，不依赖系统字体）；文字层始终位于素材上方，暂停使用亮冷白而非暗灰
-- 支持整体中央 HUD、标题、计时、比分文字和信息面板的位置及尺寸调节；旧布局自动迁移至 V4（重置旧信息面板尺寸和偏移）
-- 支持布局保存和加载，文件名为 `broadcast_layout.ini`
-- 支持导入队伍对阵表、预选任意一行并显式应用，当前 BO3 内禁止误切换；切换后旧选手重新登记
-- 正式主比分为 BO3 胜局数，双方剩余复活次数显示在血条下方，结算明确显示胜利原因；击杀仅作统计。旧调试模式仍按击杀积分和 SUDDEN DEATH 判定
-- 每小局结束自动播放红胜、蓝胜或平局结算动画；可终止本局或由裁判手动判定
-- 正式结算后服务端自动打开裁判录入辅助页，复制胜方、双方血量/复活次数及结束方式；画面显示简明胜因，不弹出旧大统计面板。旧调试模式保留可展开统计面板
-- 选手端无需密码，只登记红方/蓝方身份并绑定视频流来源
-- 登记后的选手端显示细小静态准星；比赛进行中己方血量下降触发短暂淡红边，对方血量下降触发小型命中标记。首次快照、重连、换身份、暂停及结束不触发；血量快照不含扣血原因，因此对方黄牌扣血也可能被显示为命中反馈，不能当作命中裁判依据
-- 选手端准星左右显示开放双弧：左侧为热量预算可发弹数 / 最大 20 发，低于等于 3 发为橙色、不可发为红色；右侧估计恢复下一发的 1 秒冷却周期。数字只按己方真实热量快照更新，不因动画提前增加；无效/超时/暂停/离线显示未知，射击许可关闭或死亡显示 0
-- 热量规则来自枪管 `main_xjx` 分支 `6222c4c5655d2722a224d0e4541ccd624a6b5161` 的 `Core/Inc/thermal.h`、`Core/Src/thermal.c` 与 `docs/CAN_PROTOCOL.md`：上限 200、每发 +10、每秒阶梯减 10（默认 main 是旧调试代码）。左侧用 `floor((200-heat)/10)` 计算完整热量预算，不代表弹仓余弹或硬件射击授权；右弧没有设备冷却时钟，首次仅估计，热量下降时校准，周期满后等待遥测确认、不虚构连续恢复。连续 1500 ms 未收到己方有效热量则显示 `--/20`
-- 支持手动切换和按时间自动切换全场、红方、蓝方视频视角
-- 提供 ESP32 车载端模拟器，便于没有实机时联调
-- 所有窗口按参考分辨率统一缩放，支持 16:9、4:3 和超宽屏；转播 HUD 在非 16:9 输出中保持比例并自动留白
+> [!NOTE]
+> 阅读方式：正文是正常使用需要的内容。蓝色 **Note** 是补充说明，绿色 **Tip** 是能省事的做法，紫色 **Important** 是必须遵守的约定，橙色 **Warning** 是容易出错的地方。带 ▶ 的折叠块是参考资料，需要时再展开。
 
 ## 程序组成
 
-- `Scompetition.exe`：赛事服务端、机器人 UDP 监控、转播控制台和选手端登记服务
-- `ScompetitionClient.exe`：选手端登记窗口、视频设备选择和全屏 HUD
-- `RobotSimulator.exe`：模拟 ESP32 节点，向 UDP `5005` 发送真实机器人协议数据
+| 程序 | 用途 |
+| --- | --- |
+| `Scompetition.exe` | 服务端：接收机器人数据、判定胜负、导播控制台和转播输出窗口 |
+| `ScompetitionClient.exe` | 选手端：登记红/蓝方身份，推送摄像头画面，显示全屏 HUD |
+| `RobotSimulator.exe` | 模拟 ESP32 车载端，没有实车时用来联调 |
 
-V2 使用设备 Wi-Fi MAC 发现设备，再由服务端分配唯一机器人 ID 和红蓝队伍；V2 数据包不携带队伍编号。V1 才使用包内的队伍与机器人编号。
+## 比赛规则
 
-### 用模拟器分配红蓝队伍
+默认使用正式 BO3 规则：
 
-1. 启动服务端的 UDP 监听（默认 5005）。
-2. 启动 RobotSimulator.exe，选择 V2。服务器地址填服务端 IPv4；同机测试填 127.0.0.1。
-3. 单车的“本机绑定 IPv4”可保留 0.0.0.0；同机两车分别使用 127.0.0.2 和 127.0.0.3，避免争用下行 UDP 5006。启动后，服务端设备列表会显示模拟 ESP32 MAC。
-4. 在服务端“设备管理”选择设备，填写不同的机器人 ID、红/蓝方及有效的手柄 MAC（6 字节、不能全零），点击分配。收到成功 ACK 后才保存队伍映射。模拟器内的 ID 和手柄 MAC 会同步显示。
-5. 分别分配红蓝设备后开始比赛。模拟器准备模式 HP 为 200，GAME_START 后为 300；普通受击扣 20，前两张黄牌各扣 50，第三张判负。V2 正式死亡后 5 秒发复活请求，服务端批准才恢复，准备模式 5 秒后自动复活；正式死亡不能用正数 SET_HP 绕过批准。模拟器不代表真实电源、BLE 或物理安全互锁。
+- 每局开始前 5 秒倒计时，双方设备确认后进入 180 秒小局
+- 每小局每方 3 次复活，阵亡 5 秒后由车载端申请，服务端批准后复活
+- 小局之间 120 秒准备时间，先赢 2 局的一方获胜
+- 时间到时先比剩余复活次数，再比剩余血量
+- 没有技术暂停；数据相同、同时耗尽或数据不可信时，交给裁判手动判定，不会自动加时
 
-模拟设备身份按本机 IPv4 分别保存，重启后保留；V2 的队伍和 ID 不再通过模拟器下拉框手动指定。可以在运行时修改 HP、热量、功率等状态输入，以测试异常快照，输入框本身不强制模拟完整 L431 状态机。服务端停止监听时禁止发送分配；重新分配 ID 后会清理旧 ID 的比赛状态。
+相关文档：[正式比赛流程](<docs/FORMAL_MATCH_FLOW.md>)
 
-### 协议与显示回归
+> [!NOTE]
+> 旧的 60 秒击杀积分 + SUDDEN DEATH 规则仍然保留。在控制台“胜负判定”里切换到“旧调试 · 击杀积分”即可使用，只用于调试。
 
-SimulatorIntegrationTest 运行真实 Qt 窗口类、两台环回 UDP 模拟设备和 TCP 选手端，使用临时 INI 配置，不读写比赛用的注册表配置，也不在桌面显示窗口。覆盖设备发现、21 字节分配、ACK、重试去重、重启、重新分配、掉线、供电、链路、射击状态，以及 V1 热量归零。
+> [!WARNING]
+> 目前还没有实现小组获胜点总榜和自动晋级。模拟器测试通过不代表实车安全，也不代表完全符合比赛手册。规则对照见 [规则符合性审查](<docs/COMPETITION_RULE_COMPLIANCE.md>)。
 
-离屏渲染检查 HUD 的 1024×768、1280×720、1920×1080、2560×1080；血量 0/1/30/150/300 的像素填充边界、条内数字与几何布局，并检查监控文字/热量条不出现在比赛画面。另检查服务端/选手端 1024×768、1600×900，以及模拟器 640×480、1024×768。
+## 快速上手（用模拟器）
 
-SimulatorIntegrationTest 还覆盖完整击杀积分链路：两台模拟器开赛、受击、击杀后 +1 但继续比赛、时间到按分数判胜、下发 GAME_END、选手端收到赛后数据并同步展开，以及下一局清零、暂停/继续不重发 GAME_START、终止不改积分。同分加时检查服务端/选手端在 00:00 仍进行比赛、热量反馈有效、不回满血、加时暂停恢复及决胜击杀。赛后面板在四种 HUD 尺寸下分别检查折叠和展开状态的边界，截图为 `summary-*.png`。
+1. 启动 `Scompetition.exe`，点击“启动监听”。
+2. 启动两个 `RobotSimulator.exe`，选择 V2 协议，服务器地址填服务端 IP（同一台电脑填 `127.0.0.1`）。
+3. 在服务端“设备管理”里选中设备，填机器人 ID、红/蓝方和手柄 MAC，点“分配 ID + 手柄”。
+4. 启动 `ScompetitionClient.exe`，选择红方或蓝方和摄像头，完成登记。
+5. 在控制台点“显示转播画面”，选好输出屏幕，再点“开始本局”。
 
-PlayerCombatOverlayTest 覆盖 HP 基线、首次/重复/回血/未知/掉线/身份变化和准星/红边/命中标记绘制；SimulatorIntegrationTest 增加红蓝双方真实 TCP 反馈、暂停恢复、重连、协议变化、回合时钟重置、720p/1080p/4K 准星居中和退出登录回归。另有 FieldCameraTest（可注入采集后端、首帧/换源/断连/有界恢复）和 CheckinModelTest（首连会话/健康证据/模块异常），集成测试覆盖服务端本地全场、缩略图与检录界面。当前共注册 13 项 CTest（新增正式流程、审批协议、裁判面板、正式 HUD 和正式网络集成）；可设 SCOMP_TEST_PLAYER_ONLY=1 仅运行集成测试中的选手反馈场景。
+> [!TIP]
+> 同一台电脑跑两台模拟器时，把两边的“本机绑定 IPv4”分别填成 `127.0.0.2` 和 `127.0.0.3`，否则它们会抢同一个下行端口 `5006`。
 
-构建后可运行 `ctest --test-dir build/msvc2022_64-Debug --output-on-failure`。若开发机找不到离屏插件，先设置 QT_QPA_PLATFORM_PLUGIN_PATH 为 Qt 安装目录下的 plugins/platforms。用 QT_SCALE_FACTOR=1、1.25、1.5、2 分别运行集成测试可复验缩放矩阵；PNG 保存在测试程序目录的 simulator-verification/scale-倍率/。此验证不覆盖真实显示器跨屏迁移、GPU 视频和硬件固件联调。
+> [!NOTE]
+> 第 3 步点了分配后，要等设备回 ACK 才算生效，列表里的队伍才会更新。
 
-## 旧调试模式：自动胜负判定
+### 没有车时测试开赛
 
-正式默认模式的判定、审批与 BO3 流程见 [正式比赛流程](<docs/FORMAL_MATCH_FLOW.md>)。以下只描述保留的旧击杀调试模式。
+正式模式要求双方设备都在线才能开赛。只想走一遍服务端流程时，勾选“比赛与转播”里的“无车调试”：
 
-判定逻辑在 `matchreferee.h/.cpp`，不依赖 UI 和系统时钟，由 `MatchRefereeTest` 覆盖。控制台“胜负判定”区可调整规则，设置保存在本机 QSettings（`Scompetition/MatchReferee`）。同一时刻多个条件成立时按以下顺序取第一条：
+- 开赛时不检查设备、不发 GAME_START，倒计时结束后直接进入小局
+- 没有血量数据，时间到后用“判红方胜 / 判蓝方胜”手动判定
 
-1. 裁判终止 / 判红方胜 / 判蓝方胜
-2. 红牌判负（可关闭）、累计 3 张黄牌判负；双方同时满足判平局
-3. 离线判负：比赛进行中一方连续离线超过设定秒数（默认 10 秒，0 为关闭）且另一方在线；暂停时间不计，双方都离线时不自动判
-4. 常规时间（1 分钟）：一方从存活变为阵亡（`alive=0` 或 HP=0，或收到 DEATH）对方击杀积分 +1。重复死亡事件/状态不重复加分，复活不撤销积分，下一次阵亡可再次得分。开局已死亡、暂停期间、离线/设备移除和可识别的判罚阵亡不计击杀；协议没有击杀者/伤害原因，1v1 正常阵亡归对方，管理员 SET_HP=0 等不带原因的情况仍需裁判纠正比分。
-5. 时间到：只比较本局击杀积分，不比较血量、伤害或判罚次数。更高者胜；同分保持当前 HP 进入 SUDDEN DEATH，无限时、一命定胜负。中央计时冻结 00:00，状态栏标明加时，射击和热量反馈保持有效。边界击杀先等待 0.3 秒同时击杀确认。
-6. SUDDEN DEATH：单方击杀确认 0.3 秒后判胜；双方在窗口内同时击杀各得 1 分但不判平局，继续等待复活后的下一次单方击杀。加时不发送 GAME_START/GAME_END，不回满血；只有最终裁决才发送 GAME_END。
+> [!IMPORTANT]
+> 无车调试仅用于测试。每次启动默认关闭，比赛进行中不能切换，切换时会重置当前 BO3。
 
-中央比分和控制台积分均为本局击杀分（裁判可手动纠正）；结算不追加胜利积分，新局/重置清零。旧“击毁即结束”和“胜方小局积分自动 +1”选项及其旧设置不再生效。伤害统计按 HP 下降累计，黄牌自身的 50 HP 扣减不计入对手伤害。常规/加时暂停后继续均不发送 GAME_START，避免机器人回满血。
+## 控制台常用功能
 
-## 队伍名称表
+**队伍表**：点“导入队伍表”，选一组对阵后点“应用所选对阵”。换队会清空比分、牌面和计时，已登记的选手需要重新登记。文件格式见下面的[队伍表格式](#队伍表格式)。
 
-在 `Scompetition.exe` 控制台的队名区域点击 **导入队伍表**。导入只产生候选列表，选择任意对阵后点击 **应用所选对阵**；**下一组队伍**仍可作为快捷操作。正式 BO3 期间禁止应用、导入即替换或更换设备；整场结束后可选择下一对阵。
+**判罚**：先在“状态”页选中机器人，再发红牌或黄牌。黄牌前两张各扣 50 HP，第三张判负；红牌是否直接判负可以在“胜负判定”里设置。
 
-切换队伍时会自动：
+**导播**：可以手动切换全场、红方、蓝方视角，也可以按设定时间自动轮换。点击“已接入视频源预览”里的缩略图可直接切到对应画面。
 
-- 更新红方和蓝方队伍名称
-- 重置 1 分钟比赛计时
-- 重置本局比分
-- 清除红牌和黄牌显示
-- 清除血量变化记录，避免上一局的血量变化触发受击特效
-- 将新的比赛状态重新发布给已登记的选手端
+**本地全场摄像头**：服务端可以直接采集本机 USB 摄像头作为全场视角，不占红蓝选手的位置。
+相关文档：[USB 全场摄像头](<docs/SERVER_USB_CAMERA.md>)
 
-支持的文件格式如下：
+**车辆检录**：“赛前检查”会打开一个只读窗口，查看各车的连接状态、模块健康和遥测数据，不发送任何命令。
+相关文档：[车辆检录](<docs/CHECKIN_MODE.md>)
 
-- **CSV**：使用英文逗号 `,` 分隔两列
-- **TSV**：使用 Tab 字符分隔两列
-- **TXT**：每行使用英文逗号或 Tab 字符分隔两列
-- **JSON**：使用数组保存多组红蓝队伍
+**裁判录入**：每小局结束后自动切到“裁判录入辅助”页，可以复制胜方、双方剩余血量和复活次数、结束方式，填到外部成绩系统里。
 
-文本文件使用 UTF-8 编码。每行的第 1 列是红方队名，第 2 列是蓝方队名；首行可以写列标题，也可以省略。空行以及以 `#` 或 `//` 开头的注释行会被跳过。
+**选手端 HUD**：登记后显示准星、受击红边和命中标记，准星两侧的弧线显示热量允许的可发弹数和冷却进度。
+相关文档：[选手热量弧](<docs/PLAYER_HEAT_ARCS.md>)
 
-### CSV 模板
+**转播布局**：在“HUD 布局”页调整各元素的位置和大小，可以保存或加载 `broadcast_layout.ini`。非 16:9 输出会自动留黑边，不会被拉伸。
+
+> [!IMPORTANT]
+> 正式 BO3 进行中不能换队，一场打完再换。
+
+> [!NOTE]
+> 程序不会自动上传成绩，裁判录入需要人工完成。选手端的命中标记只是根据血量变化推断出来的，不能作为判罚依据。
+
+## 队伍表格式
+
+每行一组对阵，第一列红方、第二列蓝方，第一行可以写表头。支持 CSV、TSV、TXT 和 JSON。
+
+模板文件：[team_names_template.csv](team_names_template.csv)、[team_names_template.json](team_names_template.json)
+
+<details>
+<summary>各格式的详细写法</summary>
+
+文本文件使用 UTF-8 编码。空行和以 `#`、`//` 开头的行会被忽略。
+
+CSV 或 TXT（逗号分隔）：
 
 ```csv
 红方队名,蓝方队名
@@ -111,186 +101,134 @@ PlayerCombatOverlayTest 覆盖 HP 基线、首次/重复/回血/未知/掉线/�
 Alpha,Bravo
 ```
 
-可直接使用项目根目录中的 [team_names_template.csv](team_names_template.csv)。
+TSV 的格式相同，只是两列之间用 Tab 分隔。
 
-### TSV 模板
-
-下面两列之间必须是实际的 **Tab 字符**，不是多个空格：
-
-```text
-红方队名	蓝方队名
-赤焰战队	蓝盾战队
-Alpha	Bravo
-```
-
-### TXT 模板
-
-TXT 文件可以使用逗号分隔，格式与 CSV 相同：
-
-```text
-红方队名,蓝方队名
-赤焰战队,蓝盾战队
-Alpha,Bravo
-```
-
-### JSON 模板
-
-JSON 支持 `red` / `blue` 或 `redName` / `blueName` 字段：
+JSON 使用数组，字段名可以是 `red`/`blue`，也可以是 `redName`/`blueName`。数组也可以放在 `teams`、`matches`、`pairs` 或 `teamPairs` 字段里：
 
 ```json
 [
-  {
-    "redName": "赤焰战队",
-    "blueName": "蓝盾战队"
-  },
-  {
-    "red": "Alpha",
-    "blue": "Bravo"
-  }
+  { "redName": "赤焰战队", "blueName": "蓝盾战队" },
+  { "red": "Alpha", "blue": "Bravo" }
 ]
 ```
 
-也可以把数组放在 `teams`、`matches`、`pairs` 或 `teamPairs` 字段中。可直接使用项目根目录中的 [team_names_template.json](team_names_template.json)。
+</details>
 
-## 本地测试流程
+## 网络与协议
 
-1. 启动 `Scompetition.exe`，在控制台点击“启动监听”。默认监听机器人 UDP `5005`，选手端登记服务端口为 TCP `5010`。
-2. 启动 `RobotSimulator.exe`，选择 **V2 协议**（默认），机器人 ID 任意。
-3. 等待 ESP32 上报 `0x0A DEVICE_ANNOUNCE`，在“设备管理”面板选择设备，输入手柄 BLE MAC，设置机器人 ID 与队伍，然后点击“分配 ID + 手柄”。服务器会发送 21 字节 `0x83 ASSIGNMENT`，并等待 ESP32 的 ACK。
-4. 在模拟器或 ESP32 端启动状态发送，生成状态、受击、攻击、死亡、复活、设备健康和射击权限事件。
-5. 启动 `ScompetitionClient.exe`，选择红方或蓝方，选择视频设备并完成登记。
-6. 在控制台打开转播画面，选择输出屏幕和当前导播视角。控制台下方“已接入视频源预览”区会实时显示所有在线源的缩略图，点击任一缩略图切换为该视角。
+| 方向 | 端口 |
+| --- | --- |
+| 机器人 → 服务端 | UDP `5005` |
+| 服务端 → 机器人 | UDP `5006`（ESP32 监听） |
+| 选手端 → 服务端（登记） | TCP `5010` |
+| 红方 / 蓝方视频 | UDP `5011` / `5012`（TCP 端口 +1 / +2） |
 
-### 多显示器和分辨率验证
+当前使用 V2 协议，与 ESP32 仓库 `2470519590/ESP32-S3-Module-for-Judgement-System` 保持同步。设备先用 Wi-Fi MAC 上报自己，再由服务端分配机器人 ID 和队伍；机器人身份不按 IP 识别。
 
-控制台的“转播输出屏幕”选择框使用系统屏幕列表。选择副屏后，转播窗口会在副屏全屏显示，控制台仍可留在主屏。布局会根据窗口宽高比例缩放；4:3 输出上下留白，超宽输出左右留白，避免 HUD 被拉伸。
+相关文档：[protocol.h](protocol.h)、[matchprotocol.h](matchprotocol.h)、[V2 迁移说明](<docs/V2_MIGRATION_PLAN.md>)
 
-自动化验证可使用 `tools/capture-broadcast.ps1`，脚本默认选择第一块非主屏并不会把验证窗口移到 `(0,0)`：
+<details>
+<summary>命令可靠性和 V1 兼容</summary>
 
-```powershell
-.\tools\capture-broadcast.ps1 -Size 1024x768 -OutFile build\layout-verification\secondary-1024x768.png -Screen secondary
-.\tools\capture-broadcast.ps1 -Size 2560x1080 -OutFile build\layout-verification\secondary-2560x1080.png -Screen secondary
-```
+- 比赛控制命令只单播给指定的机器人 ID，设备需要回 ACK。
+- 死亡、复活这类可靠事件按事务号去重，服务端重启后也不会重复执行。
+- 服务端仍能解析旧的 V1 帧，方便测试旧固件。新部署请使用 V2。
 
-也可以直接为三个程序指定验证窗口：`SCOMP_MAIN_SCREEN` / `SCOMP_MAIN_SIZE`、`SCOMP_CLIENT_SCREEN` / `SCOMP_CLIENT_SIZE`、`SCOMP_SIMULATOR_SCREEN` / `SCOMP_SIMULATOR_SIZE`。`secondary` 表示第一块非主屏，数字值表示从 0 开始的屏幕索引。未设置这些变量时，生产启动行为保持不变。
+</details>
 
-视频链路性能测试请使用 **Release** 构建。Qt Debug DLL、断言和未优化代码会明显放大摄像头转 QImage、H.264 编码和解码开销。
+## 视频链路
 
-选手端通过 `QMediaDevices::videoInputs()` 枚举 Windows 摄像头，使用 `QCamera + QVideoSink` 直接解码显示本地预览（无需 FFmpeg）。登记成功后，同一摄像头帧经 rawvideo 管道喂给 FFmpeg 编码为 H.264，通过 MPEG-TS/UDP 发送到服务端；服务端按红蓝方独立接收、解码，再交给 `BroadcastWindow::setSourceFrame()` 渲染。点击视频源旁的 **内置摄像头** 可自动选中系统默认摄像头（通常为笔记本内置 Integrated Camera）。
+选手端读取摄像头，经 FFmpeg 编码成低延迟 H.264 通过 UDP 发给服务端，服务端分别解码红蓝两路画面后显示在转播窗口。两端都优先使用程序目录下的 `tools/ffmpeg/ffmpeg.exe`，发布包不需要另外安装 FFmpeg。
 
-选手端全屏画面使用 GPU 加速的 `QOpenGLWidget` 绘制，不再对每一帧执行全屏 `QPixmap` 缩放，也不再人为限制全屏渲染帧率。推流编码使用摄像头实际选择的帧率和 960×540、2.5 Mbps 的 H.264 低延迟配置，并在 FFmpeg 管道积压时主动丢帧。服务端解码器积压超过 128 KB 时会重启解码器清除陈旧管道。选手端日志每 2 秒记录实际 FPS、推流积压和累计丢帧，便于定位性能问题。
+> [!TIP]
+> 测试视频性能请使用 Release 版，Debug 版会明显卡顿。
 
-结算动画资源位于 `Assets/gamefinishvideo`。每个动画由同名的 `_rgb.mp4` 和 `_alpha.mp4` 组成，播放器使用 FFmpeg 将灰度蒙版作为透明度逐帧合成。导播台播放实际胜负动画，选手端则根据登记队伍将对手胜利动画映射为 `defeated`。
+<details>
+<summary>编码参数和结算动画</summary>
 
-客户端和服务端都会优先使用程序目录中的 `tools/ffmpeg/ffmpeg.exe`，因此正式发布包不依赖系统安装 FFmpeg。程序目录或系统 `PATH` 中的 FFmpeg 仍作为开发环境兼容路径。客户端相机输入按 1280×720 和摄像头支持的最高帧率处理，H.264 编码为 960×540、2.5 Mbps 的 `ultrafast/zerolatency` 流，服务端输出 640×360 BGRA 帧供 Qt 显示。
+- 编码为 960×540、2.5 Mbps；编码积压时主动丢帧，避免延迟越积越大。
+- 结算动画放在 `Assets/gamefinishvideo`，每个动画由同名的 `_rgb.mp4` 和 `_alpha.mp4` 组成。
 
-## 车辆检录模式
+</details>
 
-控制台「比赛与转播 → 赛前检查」可打开独立只读检录窗口，不下发命令、不暂停比赛或摄像头。显示车辆/未分配设备的连接状态、模块摘要、服务端进程首次有效上行时间、本检录会话首次观察连接时间、最近上报、设备/手柄 MAC、遥测和诊断提示。六个健康位分别为 L431PM、枪管、装甲板1～4；只有合法、新鲜、来源匹配的 V2 健康帧才判定在线/未在线，V1、未上报、过期及离线明确显示未知。首连历史保留至新检录会话；服务端首个上行时间只由真实记录显示，不用最近时间推算。详情见 `docs/CHECKIN_MODE.md`。模块在线不等于硬件验收通过。
+## 构建
 
-## 服务端本地 USB 全场摄像头
-
-服务端现可直接采集本机 USB/内置摄像头，作为独立 `field` 全场视角，不占红蓝选手身份。在「本地全场摄像头」选择设备、点击「启动采集」，再「切到全场」或点击全场缩略图。默认不打开相机，只记忆设备 ID；支持同名设备区分、刷新、换源、停止释放、断开清帧、同设备重连及有界异常重试。摄像头独立于比赛暂停/结束/重置。详情与硬件验证边界见 `docs/SERVER_USB_CAMERA.md`。
-
-## 网络协议
-
-- 机器人到服务端（上行）：UDP `5005`
-- 服务端到机器人（下行）：UDP `5006`（ESP32 监听）
-- 选手端到服务端：TCP `5010`
-- 红方视频：服务端 TCP 端口 + `1`，默认 UDP `5011`
-- 蓝方视频：服务端 TCP 端口 + `2`，默认 UDP `5012`
-
-### V2 协议（当前正式版）
-
-- `version=2`，与 ESP32 仓库 `2470519590/ESP32-S3-Module-for-Judgement-System` 同步
-- 状态帧 `0x01`：14 字节，`robot_id + hp + heat + power + alive + shoot_enabled + power_on`
-- 普通事件 5 字节：受击 `0x04`、攻击 `0x05`、允许/禁止射击 `0x06/0x07`、L431 链路断开/恢复 `0x08/0x09`、脱离战斗 `0x0B`
-- 可靠事件 9 字节：死亡、复活（含 `transaction_id`，服务器必须 ACK + 按 `(robot_id, type, txid)` 去重）
-- 设备注册 `0x0A`：25 字节，`robot_id + ESP32 Wi-Fi MAC + controller BLE MAC + event_queue_drops + udp_send_failures`
-- 设备健康 `0x0C`：6 字节，`robot_id + component_online`（bit0=L431PM，bit1=枪管，bit2~5=装甲板 1~4）
-- 下行命令（服务器→ESP32:5006）：
-  - `0x81 GAME_START` / `0x82 GAME_END`：9 B + ACK
-  - `0x83 ASSIGNMENT`：分配 robot_id + ESP32 Wi-Fi MAC + 手柄 BLE MAC，21 B + ACK
-  - `0x84 STATUS_REQUEST`：5 B，无 ACK
-  - `0x85 SET_HP`：11 B + ACK（正式比赛 0..300；准备模式 0..200）
-  - `0x86 YELLOW_CARD`：9 B + ACK（前 2 次 -50 HP，第 3 次判负）
-  - `0x87 FORCE_POWER_OFF` / `0x88 FORCE_POWER_ON`：9 B + ACK
-- 所有比赛控制命令只支持按非零 `target_robot_id` 单播，不支持广播；下行必须发往 ESP32 的 UDP `5006`。
-- ACK `0xF0`：10 B，回 `result`：`0` 成功 / `1` 拒绝 / `2` 失败
-- `robot_id → team` 映射由服务器在“设备管理”面板维护并持久化（QSettings）
-- 死亡/复活事务去重表也持久化，防止服务器重启后 ESP32 重发旧事务被重复执行
-
-### V1 协议（旧版兼容，仅解析）
-
-服务端仍识别 `version=1` 帧（10/12 B 状态 + 6/8 B 事件，含 `team` 字段），便于旧固件回归测试。**新部署一律使用 V2**。
-
-协议实现见 [protocol.h](protocol.h)、[matchprotocol.h](matchprotocol.h)，V2 迁移细节见 [docs/V2_MIGRATION_PLAN.md](docs/V2_MIGRATION_PLAN.md)，原始规范见 ESP32 仓库 README 和 `docs/v2更新说明.md`。
-
-### 运行日志与崩溃转储
-
-服务端启动后会在可执行文件目录的 `logs/` 下创建 `Scompetition-YYYYMMDD.log`；选手端会创建 `ScompetitionClient-YYYYMMDD.log`，其中包含实际 FPS、推流积压和累计丢帧。若发生未处理异常，会在同一目录生成 `Scompetition-crash-*.dmp`，可直接交给 Visual Studio 或 WinDbg 分析。若程序目录不可写，日志会回退到 Qt 的应用本地数据目录。
-
-## GitHub 自动构建与独立发布包
-
-提交并 **push 到 GitHub 任意分支**后，自动构建、测试并发布三个 Windows 10/11 x64 ZIP：**服务端、选手端、结果展示网页**。各包带运行依赖、素材、启动入口和SHA256清单；网页内置Python/SQLite，不需目标电脑安装Python。PR只构建不发布；支持手动运行。仅本地commit不会触发GitHub。
-
-部署、工作流权限、三包内容与本地复现见 [GitHub Release说明](<docs/GITHUB_RELEASE.md>)。使用统一入口加 `-SplitPackages` 生成三包；不带该参数保留旧合并包导出方式。
-
-## Windows 正式发布与构建目录
-
-当前源码版本为 **0.2.0**，版本号以 `CMakeLists.txt` 的 `project(... VERSION ...)` 为唯一来源。历史二进制不会因源码升级而自动变成新版本。
-
-推荐在项目目录运行统一入口：
+需要 Visual Studio（MSVC）和 Qt 6.8.3（含 Multimedia 模块）。使用项目自带的构建脚本：
 
 ```powershell
-# 默认使用 MSVC 2022，构建 Release、安装完整运行目录并生成 ZIP
-.\tools\build.ps1 -Configuration Release
+# Release 构建，运行测试，生成服务端和选手端两个独立 ZIP
+.\tools\build.ps1 -Configuration Release -Test -SplitPackages -QtDirectory <Qt 安装目录>
 
-# Debug 构建并运行已注册的 CTest，再导出
-.\tools\build.ps1 -Configuration Debug -Test
+# Debug 增量编译，不导出
+.\tools\build.ps1 -Configuration Debug -BuildOnly -QtDirectory <Qt 安装目录>
 
-# 只做增量编译，不导出；查看计划不会配置或构建
-.\tools\build.ps1 -Configuration Debug -BuildOnly
+# 只显示构建计划，不实际执行
 .\tools\build.ps1 -Configuration Release -Plan
 ```
 
-Qt 默认路径为 `G:\Dev\Qt\6.8.3\msvc2022_64`，可用 `-QtDirectory` 覆盖；可用 `-VisualStudioDirectory`、`-BuildDirectory`、`-Jobs` 指定工具链、缓存和并行度。旧的 `tools/build-msvc-debug.cmd` 转调统一入口，不再生成旧工具链目录。发布依赖 Widgets、Network、Multimedia、OpenGLWidgets，以及 Windows 的 dbghelp。
+> [!IMPORTANT]
+> 版本号只以 `CMakeLists.txt` 中的 `project(... VERSION ...)` 为准，当前为 0.2.0。
 
-### 命名和分区约定
+<details>
+<summary>常用参数</summary>
 
-发布名称使用 `v版本号_yyyyMMdd-HHmmss_平台_配置`，时间为 **UTC 构建会话开始时间**。同一构建的目录、ZIP 与元数据使用相同时间，不使用归档时间冒充构建时间。例如：
+| 参数 | 说明 |
+| --- | --- |
+| `-QtDirectory` | Qt 安装目录，默认 `G:\Dev\Qt\6.8.3\msvc2022_64` |
+| `-VisualStudioDirectory` | VS 安装目录，不填时按脚本里写死的几个路径查找 |
+| `-WindowsSdkEnvironment` | 使用项目内置的 Windows SDK（`build/tools/windows-sdk/Enable-WindowsSdk.ps1`） |
+| `-PythonExecutable` | 打包校验用的 Python，可以用 `build/tools/release-python` 里的虚拟环境 |
+| `-Jobs` | 并行编译数，默认 4 |
+
+</details>
+
+### 构建产物
 
 ```text
 build/
-  msvc2022_64-Debug/                         # 保留稳定路径的最新开发缓存
-  msvc2022_64-VideoRelease/                  # 保留稳定路径的最新 Release 缓存
-  releases/v0.2.0_20261009-073000_win64_Release/
-    bin/build-info.json
-  packages/WOD-Internal-Match-Server_v0.2.0_20261009-073000_win64_Release.zip
-  deprecated/v0.1/                          # 已废弃的历史构建
-  deprecated/legacy-unknown/                # 无法证明软件版本的历史产物
-  verification/legacy/                     # 历史截图、渲染和视频验证数据
-  logs/legacy/                             # 历史构建与测试日志
-  references/                              # 上游源码与协议核对材料
-  backups/                                 # 注册表等恢复备份
-  latest-Release.json                       # 最近一次成功导出的索引
-  latest-Debug.json
+  cache/msvc2026_64-Debug/     # 开发缓存（VS 2022 时为 build/msvc2022_64-*）
+  releases/<构建 ID>-split/    # 展开的发布目录
+  packages/                    # ZIP 和 SHA256SUMS
+  deprecated/                  # 不再使用的旧构建，按版本分组
+  latest-split.json            # 最近一次发布的索引
 ```
 
-- 不重命名正在使用的 CMake 缓存：缓存/Ninja 含绝对路径，移动后不能直接增量编译。已归档缓存只作历史保存，需要重新配置才能构建。
-- 每次成功导出创建新的版本/时间目录，不覆盖旧发布。脚本不会自动判定旧发布为 deprecated；确认不再使用后再归档，避免误收纳仍在使用的版本。
-- `bin/build-info.json` 保存版本、会话时间、编译器、Qt、Git 提交及脏工作区标记；`latest-*.json` 另记录完成时间、导出位置、ZIP SHA256 和本次是否执行测试。
-- 历史整理使用 `tools/organize-legacy-builds.ps1`，可先加 `-WhatIf` 查看，只移动不删除；构建版本来自原 CPack 元数据，历史时间来自程序或产物修改时间并在迁移清单中明确来源。无法证明版本的项目标为 `legacy-unknown`，不编造版本号。
-- FFmpeg、Qt DLL、结算素材和布局文件必须随发布目录分发，不能只复制三个 EXE。
+构建 ID 的格式是 `v版本_yyyyMMdd-HHmmss_win64_配置`，时间为 UTC。每个发布目录里的 `build-info.json` 记录了编译器、Qt 版本、Git 提交，以及工作区是否有未提交的改动。
 
-## 手动编译
+> [!WARNING]
+> - 不要重命名正在使用的 CMake 缓存目录。缓存里记录的是绝对路径，改名后就不能增量编译。
+> - 分发时要带上整个目录，不能只复制 EXE。Qt DLL、FFmpeg 和结算素材都要一起带上。
 
-项目使用 CMake、Ninja 和 Qt 6。手动编译仍支持稳定缓存路径；配置时 CPack 自动加入版本号、UTC 时间、平台和配置：
+> [!NOTE]
+> 每次导出都会新建目录，不会覆盖旧的。旧构建确认不用后，移到 `deprecated/`，不要删除。
+
+### 测试
+
+项目共有 14 项 CTest，覆盖判定逻辑、复活协议、正式 HUD、真实 UDP/TCP 集成和无车调试等场景。界面测试在 offscreen 下运行，使用临时配置，不会影响本机的比赛设置。
 
 ```powershell
-cmake -S . -B build/cache/manual-Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=<Qt 安装目录>
-cmake --build build/cache/manual-Release
-cpack --config build/cache/manual-Release/CPackConfig.cmake -B build/packages
+ctest --test-dir build\cache\msvc2026_64-Debug -C Debug --output-on-failure
 ```
 
-手动增量构建若不重新配置，元数据时间保持上次配置会话的时间；需要每次构建准确命名时请使用统一入口。也可在配置时显式传入 `-DSCOMP_BUILD_TIMESTAMP=yyyyMMdd-HHmmss`（UTC）。
+> [!WARNING]
+> `simulator_integration` 等集成测试会占用 UDP `5006`。运行前先关掉正在运行的模拟器，否则测试会报 “Simulator failed to bind”。
+
+> [!TIP]
+> 如果提示找不到 offscreen 插件，先把 `QT_QPA_PLATFORM_PLUGIN_PATH` 设为 Qt 目录下的 `plugins\platforms`。
+
+## GitHub 自动发布
+
+push 到任意分支后，GitHub Actions 会自动构建、测试，并发布服务端和选手端两个 Windows x64 ZIP。只有 main 上的发布会被标为最新版，PR 只构建、不发布。
+
+相关文档：[GitHub 发布说明](<docs/GITHUB_RELEASE.md>)
+
+## 日志
+
+服务端和选手端都在程序目录下的 `logs/` 里写日志（`Scompetition-日期.log`、`ScompetitionClient-日期.log`）。程序崩溃时会在同一目录生成 `.dmp` 文件，可以用 Visual Studio 或 WinDbg 打开。
+
+> [!NOTE]
+> 程序目录不可写时，日志会写到系统的应用数据目录。
+
+## 已弃用
+
+`results-web` 成绩网页已停止维护，也不再打包发布，代码暂时保留在仓库里。
