@@ -104,6 +104,13 @@ int main(int argc, char **argv)
         check(host.grab().save(out+QStringLiteral("/heat-80-cooling-half.png")), "Cannot save cooling half-cycle");
         overlay.pulseOpponentDamage();
         check(host.grab().save(out+QStringLiteral("/heat-80-hit.png")), "Cannot save hit plus arcs");
+        // Readability over bright video: the drop shadows must keep it legible.
+        host.setStyleSheet(QStringLiteral("background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+                                          "stop:0 #d9dee0, stop:0.5 #8fa3ad, stop:1 #f2efe6);"));
+        overlay.setHeatTelemetry(180, true); app.processEvents();
+        check(host.grab().save(out+QStringLiteral("/heat-180-bright.png")), "Cannot save bright preview");
+        host.setStyleSheet(QStringLiteral("background: #101416;"));
+        overlay.setHeatTelemetry(80, true);
         overlay.setHeatTelemetry(80, false);
         check(overlay.availableShots() == 0, "Overlay permission ignored");
         check(host.grab().save(out+QStringLiteral("/heat-disabled.png")), "Cannot save blocked arcs");
