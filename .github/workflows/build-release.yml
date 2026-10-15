@@ -48,11 +48,8 @@ jobs:
       - name: Install Windows packager
         run: python -m pip install -r tools/requirements-release.txt
 
-      - name: Test results web
-        working-directory: results-web
-        run: python -m unittest discover -s tests -v
-
-      - name: Build, test and package three applications
+      # results-web is deprecated and no longer tested or packaged.
+      - name: Build, test and package Server and Client
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -73,14 +70,13 @@ jobs:
           "### Windows x64 packages" >> $env:GITHUB_STEP_SUMMARY
           $release.packages | ForEach-Object { "- $([IO.Path]::GetFileName($_.path))" >> $env:GITHUB_STEP_SUMMARY }
 
-      - name: Upload three packages and checksums
+      - name: Upload packages and checksums
         uses: actions/upload-artifact@v4
         with:
           name: windows-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/packages/Scompetition-Server_*.zip
             build/packages/Scompetition-Client_*.zip
-            build/packages/Scompetition-ResultsWeb_*.zip
             build/packages/SHA256SUMS_*.txt
           if-no-files-found: error
           retention-days: 30
@@ -121,16 +117,14 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Three self-contained Windows 10/11 x64 applications. Extract each complete ZIP before running it.
+            Two self-contained Windows 10/11 x64 applications. Extract each complete ZIP before running it.
 
             - Server: Scompetition.exe, Qt plugins, app-local MSVC runtime, FFmpeg and settlement assets.
             - Client: ScompetitionClient.exe and its complete desktop runtime/resources.
-            - ResultsWeb: ResultsWeb.exe, bundled Python/SQLite/static artwork and Start.cmd. No Python installation required. Default display http://127.0.0.1:8765/; admin /admin. Save the generated password from the first-run console.
 
-            The current scoring model is 60-second kill-score/SD, not the official BO3 rules. Hardware/site safety acceptance is still required.
+            Default rules: formal BO3 (180 s rounds, 3 revives per side per round); the 60-second kill-score/SD mode remains as a legacy debug option. The results-web package is deprecated and no longer published. Hardware/site safety acceptance is still required.
             SHA256SUMS is included. Build/tests and sanitized-PATH package startup checks completed before release.
           files: |
             dist/Scompetition-Server_*.zip
             dist/Scompetition-Client_*.zip
-            dist/Scompetition-ResultsWeb_*.zip
             dist/SHA256SUMS_*.txt
