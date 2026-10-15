@@ -69,6 +69,7 @@ private slots:
     void onDeclareBlueWin();
     void onToggleSummary();
     void onRefereeRulesChanged();
+    void onNoDeviceDebugToggled(bool enabled);
     void onToggleClientServer();
     void refreshFieldCameraDevices();
     void onToggleFieldCamera();
@@ -245,6 +246,10 @@ private:
     CompetitionFlow m_competition;
     bool m_useCompetition = true;
     bool m_ledgerHealthy = true;
+    // No-device debug: formal flow runs without robots (no device binding,
+    // no GAME_START/ACK wait). Never persisted; off on every launch.
+    bool m_noDeviceDebug = false;
+    QCheckBox *m_noDeviceDebugEdit = nullptr;
     QComboBox *m_ruleProfileEdit = nullptr;
     QComboBox *m_teamPairEdit = nullptr;
     QPushButton *m_applyTeamPairBtn = nullptr;

@@ -552,6 +552,13 @@ void MainWindow::buildUi()
     matchActions->addWidget(m_terminateMatchBtn, 1, 0);
     matchActions->addWidget(m_resetMatchBtn, 1, 1);
     matchLayout->addRow(tr("比赛操作"), matchActions);
+    m_noDeviceDebugEdit = new QCheckBox(tr("无车调试（跳过设备检查，仅用于测试）"), matchGroup);
+    m_noDeviceDebugEdit->setObjectName(QStringLiteral("noDeviceDebug"));
+    m_noDeviceDebugEdit->setToolTip(tr("开赛不绑定机器人、不发送 GAME_START、不等待设备确认；"
+                                       "无血量数据，时间到后需裁判手动判定。每次启动默认关闭。"));
+    m_noDeviceDebugEdit->setStyleSheet(QStringLiteral("QCheckBox:checked { color: #ff9f1a; font-weight: bold; }"));
+    connect(m_noDeviceDebugEdit, &QCheckBox::toggled, this, &MainWindow::onNoDeviceDebugToggled);
+    matchLayout->addRow(tr("调试"), m_noDeviceDebugEdit);
     m_competitionPhaseLabel = new QLabel(tr("BO3 · 第1局 · 等待裁判开赛 · 03:00"), matchGroup);
     m_competitionPhaseLabel->setObjectName(QStringLiteral("competitionPhase"));
     m_competitionPhaseLabel->setWordWrap(true);
@@ -1382,6 +1389,12 @@ QVector<RobotManager::RobotInfo> MainWindow::activeMatchRobots() const
 
 bool MainWindow::bindCompetitionRobots(QString *error)
 {
+    if (m_noDeviceDebug) {
+        // No robots are bound: activeMatchRobots() stays empty and
+        // sendGameCommand() finds no eligible device to command.
+        m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
+        return true;
+    }
     if (!m_listening || !m_robots) { *error = tr("请先启动 UDP 监听并确认红蓝双方设备"); return false; }
     QHash<quint8, quint8> ids;
     QHash<quint8, QString> macs;
@@ -1489,7 +1502,16 @@ void MainWindow::updateCompetition()
     if (event == CompetitionFlow::Event::StartDevices) {
         QString error;
         if (!bindCompetitionRobots(&error)) { m_competition.cancelStart(); showActionResult(error, QStringLiteral("error")); }
-        else {
+        else if (m_noDeviceDebug) {
+            // No devices to command or wait for: confirm the start immediately.
+            m_competition.confirmStart(now);
+            m_referee.beginRound({}, now);
+            for (quint8 side : {quint8(1), quint8(2)}) m_referee.setReviveState(side, 3, false);
+            m_lastRoundSummary = {};
+            m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement(); m_broadcast->clearCards();
+            persistCompetitionLedger();
+            showActionResult(tr("[无车调试] 小局开始 · 180 秒 · 未发送设备命令，需裁判手动判定"), QStringLiteral("info"));
+        } else {
             m_startAcknowledged.clear();
             m_startRequestEpochMs = QDateTime::currentMSecsSinceEpoch(); m_startRequestMonotonicMs = now;
             sendGameCommand(true);
@@ -1535,7 +1557,8 @@ void MainWindow::refreshCompetitionUi()
     m_redRevivesLabel->setVisible(formal); m_blueRevivesLabel->setVisible(formal);
     if (!formal) return;
     const int seconds = m_competition.remainingSeconds(refereeNow());
-    m_competitionPhaseLabel->setText(tr("BO3 · 第 %1 局 · %2 · %3:%4")
+    m_competitionPhaseLabel->setText((m_noDeviceDebug ? tr("[无车调试] ") : QString())
+        + tr("BO3 · 第 %1 局 · %2 · %3:%4")
         .arg(m_competition.roundIndex()).arg(m_competition.phaseText())
         .arg(seconds/60,2,10,QLatin1Char('0')).arg(seconds%60,2,10,QLatin1Char('0')));
     m_redRevivesLabel->setText(tr("红方剩余复活：%1 / 3%2").arg(m_competition.remainingRevives(1))
@@ -1551,6 +1574,9 @@ void MainWindow::refreshCompetitionUi()
     m_applyTeamPairBtn->setEnabled(!locked && !m_teamPairs.isEmpty());
     m_redTeamNameEdit->setReadOnly(locked); m_blueTeamNameEdit->setReadOnly(locked);
     m_ruleProfileEdit->setEnabled(!locked);
+    if (m_noDeviceDebugEdit)
+        m_noDeviceDebugEdit->setEnabled(phase != CompetitionFlow::Phase::Countdown && phase != CompetitionFlow::Phase::Starting
+            && phase != CompetitionFlow::Phase::Running && phase != CompetitionFlow::Phase::AwaitingDecision);
     m_broadcast->setCompetitionState(competitionSnapshot());
 }
 
@@ -1870,6 +1896,36 @@ void MainWindow::onRefereeRulesChanged()
                  settings.status() == QSettings::NoError ? QStringLiteral("success") : QStringLiteral("error"));
     refreshCompetitionUi();
     refreshRefereeStatus();
+}
+
+void MainWindow::onNoDeviceDebugToggled(bool enabled)
+{
+    if (enabled == m_noDeviceDebug) return;
+    // Allowed between rounds (intermission included, the series is reset);
+    // blocked only while a round is live.
+    const auto phase = m_competition.phase();
+    const bool liveRound = phase == CompetitionFlow::Phase::Countdown || phase == CompetitionFlow::Phase::Starting
+        || phase == CompetitionFlow::Phase::Running || phase == CompetitionFlow::Phase::AwaitingDecision;
+    if (liveRound || m_referee.isRunning() || m_referee.phase() == MatchReferee::Phase::Paused) {
+        const QSignalBlocker blocker(m_noDeviceDebugEdit);
+        m_noDeviceDebugEdit->setChecked(m_noDeviceDebug);
+        showActionResult(tr("比赛中不能切换无车调试"), QStringLiteral("error")); return;
+    }
+    m_noDeviceDebug = enabled;
+    // Debug and real rounds must never share one BO3 score / revival ledger.
+    m_commander->cancelPendingType(proto::TypeReviveApprove);
+    m_competition.resetSeries(); m_referee.reset(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
+    persistCompetitionLedger();
+    if (m_broadcast) m_broadcast->resetMatch();
+    onLogMessage(enabled ? tr("[调试] 已开启无车调试：开赛跳过设备检查，不发送设备命令；BO3 已重置")
+                         : tr("[调试] 已关闭无车调试，恢复正式设备检查；BO3 已重置"));
+    showActionResult(enabled ? tr("无车调试已开启 · 仅用于测试，正式比赛前请关闭")
+                             : tr("无车调试已关闭 · 开赛需双方设备在线"),
+                     enabled ? QStringLiteral("info") : QStringLiteral("success"));
+    syncRefereeState();
+    refreshCompetitionUi();
+    refreshRefereeStatus();
+    publishMatchState();
 }
 
 void MainWindow::refreshRefereeStatus()

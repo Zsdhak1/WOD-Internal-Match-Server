@@ -293,6 +293,10 @@ add_executable(CompetitionIntegrationTest tools/competition_integration_test.cpp
 target_include_directories(CompetitionIntegrationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(CompetitionIntegrationTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(NoDeviceDebugTest tools/no_device_debug_test.cpp ${_competition_integration_sources})
+target_include_directories(NoDeviceDebugTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(NoDeviceDebugTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 
 enable_testing()
 add_test(NAME competition_flow COMMAND CompetitionFlowTest)
@@ -300,7 +304,8 @@ add_test(NAME revive_protocol COMMAND ReviveProtocolTest)
 add_test(NAME referee_entry_panel COMMAND RefereeEntryPanelTest)
 add_test(NAME competition_ui COMMAND CompetitionUiTest)
 add_test(NAME competition_integration COMMAND CompetitionIntegrationTest)
-set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration PROPERTIES
+add_test(NAME no_device_debug COMMAND NoDeviceDebugTest)
+set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES
