@@ -316,6 +316,15 @@ int main(int argc, char **argv)
             };
             settled(3, 3, false, "3of3");
             check(!redRevives->animating(), "Idle revive icons keep animating");
+            {
+                // Blue cores mirror red about the HUD centre line: red hugs
+                // the outer-left edge, blue the outer-right edge.
+                const QRect r(redRevives->mapTo(&window, QPoint()), redRevives->size());
+                const QRect b(blueRevives->mapTo(&window, QPoint()), blueRevives->size());
+                const int mirrorError = qAbs((r.left() + b.right() + 1) - size.width());
+                check(r.size() == b.size() && r.top() == b.top() && mirrorError <= 2,
+                      "Blue revive icons are not mirrored to the right edge");
+            }
             // Consume one: 3 -> 2 shows a break mid-frame.
             apply(revives(snapshot("running", 120), 2, 3));
             check(redRevives->animating(), "Revive consumption does not animate");

@@ -1550,9 +1550,12 @@ protected:
         const bool red = parentWidget()->property("team").toString() == QStringLiteral("red");
         setItemGeometry(QStringLiteral("health_text"), scaleRect(QRect(red ? 42 : 486, 37, 112, 64)));
         const bool formal = parentWidget()->property("competitionMode").toBool();
-        setItemGeometry(QStringLiteral("revive_count"), scaleRect(QRect(28, 105, 402, 34)));
+        // Mirror per side inside the 28..614 ribbon span: revive cores hug the
+        // outer HP-bar edge (red left, blue right), cards take the inner end.
+        setItemGeometry(QStringLiteral("revive_count"),
+                        scaleRect(red ? QRect(28, 105, 402, 34) : QRect(212, 105, 402, 34)));
         setItemGeometry(QStringLiteral("card_row"),
-                        scaleRect(formal ? QRect(440, 108, 174, 25)
+                        scaleRect(formal ? (red ? QRect(440, 108, 174, 25) : QRect(28, 108, 174, 25))
                                          : QRect(28, 106, 586, 25)));
         setItemGeometry(QStringLiteral("state_layer"), scaleRect(QRect(28, 37, 586, 64)));
         if (const Entry *layer = entry(QStringLiteral("state_layer")); layer && layer->item->widget())
