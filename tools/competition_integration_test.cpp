@@ -77,11 +77,15 @@ int main(int argc,char **argv)
         QImage frame(1920,1080,QImage::Format_RGB32);frame.fill(QColor("#102430"));bw->setProgramFrame(frame);
         const QString qa=qEnvironmentVariable("SCOMP_INTEGRATION_QA_DIR");if(!qa.isEmpty())check(QDir().mkpath(qa),"QA folder");
         const auto capture=[&](const char *name){if(!qa.isEmpty()){settle();check(main.grab().save(qa+"/"+name+".png"),"UI capture");}};
+        const auto captureClient=[&](const char *name){if(!qa.isEmpty()){settle(300);check(client.grab().save(qa+"/client-"+name+".png"),"client capture");}};
+        bool countdownCaptured=false;
         const auto startRound=[&] {
             call(main,"onToggleMatch");check(!bw->isMatchRunning(),"countdown started combat early");
+            qint64 elapsed=0;
+            if(!countdownCaptured){countdownCaptured=true;elapsed=2000;now+=elapsed;call(main,"onRefereeTick");captureClient("formal-countdown");}
             check(!child<QPushButton>(main,"applyTeamPair")->isEnabled(),"active team application allowed");
             check(!main.importTeamTable(teams.fileName(),&error),"active import not rejected");
-            now+=4999;call(main,"onRefereeTick");check(!bw->isMatchRunning(),"4.999s starts combat");
+            now+=4999-elapsed;call(main,"onRefereeTick");check(!bw->isMatchRunning(),"4.999s starts combat");
             now+=1;call(main,"onRefereeTick");
             wait([&]{return bw->isMatchRunning()&&client.isMatchRunning();},"confirmed formal start failed");
             check(bw->remainingSeconds()==180&&client.remainingSeconds()==180,"180 seconds not synchronized");
@@ -97,9 +101,10 @@ int main(int argc,char **argv)
         deathAndRevive();
         check(child<QLabel>(main,"redRemainingRevives")->text().contains("2 / 3"),"revival quota not displayed");
         wait([&]{return child<QLabel>(client,"redReviveCount")->text().contains("2");},"client quota not mirrored");
-        capture("server-revival-accounted");
+        capture("server-revival-accounted");captureClient("formal-running");
         now+=qint64(bw->remainingSeconds())*1000;call(main,"onRefereeTick");
         wait([&]{return bw->roundEnded()&&client.roundEnded();},"timeout no settlement");
+        captureClient("formal-settlement");
         auto *entry=static_cast<RefereeEntryPanel *>(child<QWidget>(main,"refereeEntryPanel"));
         check(entry->result().value("reason").toString()=="remaining_revives","wrong timeout reason");
         check(entry->result().value("winner").toInt()==2,"resource winner wrong");
@@ -110,7 +115,10 @@ int main(int argc,char **argv)
         check(bw->blueScore()==1&&bw->remainingSeconds()==0,"BO3/intermission display wrong");
         capture("server-referee-after-timeout");
         call(main,"onToggleMatch");check(!bw->isMatchRunning(),"next round skipped preparation");
-        now+=119999;call(main,"onRefereeTick");check(!child<QPushButton>(main,"startMatch")->isEnabled(),"prep ended early");
+        now+=60000;call(main,"onRefereeTick");
+        wait([&]{return child<QLabel>(client,"matchState")->text().startsWith(QStringLiteral("局间准备"));},"client shows preparation as finished");
+        captureClient("formal-intermission");
+        now+=59999;call(main,"onRefereeTick");check(!child<QPushButton>(main,"startMatch")->isEnabled(),"prep ended early");
         now+=1;call(main,"onRefereeTick");check(child<QPushButton>(main,"startMatch")->isEnabled(),"prep failed to unlock");
         check(!bw->isMatchRunning(),"automatic unsafe next round");
         startRound();check(bw->blueScore()==1&&child<QLabel>(main,"redRemainingRevives")->text().contains("3 / 3"),"new round lost wins or kept old quota");

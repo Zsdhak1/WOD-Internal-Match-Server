@@ -2597,7 +2597,10 @@ void BroadcastWindow::updateCompetitionPresentation()
     else if (m_competitionPhase == QStringLiteral("awaiting_decision"))
         phaseText = tr("等待裁判判定");
     else if (m_competitionPhase == QStringLiteral("intermission"))
-        phaseText = m_remainingSeconds > 0 ? tr("局间准备") : tr("下局准备完 · 等待裁判");
+        // m_remainingSeconds is the frozen round clock here; the preparation
+        // countdown is the raw snapshot value.
+        phaseText = m_competitionState.value(QStringLiteral("remainingSeconds")).toInt() > 0
+                        ? tr("局间准备") : tr("下局准备完 · 等待裁判");
     else if (m_competitionPhase == QStringLiteral("match_finished"))
         phaseText = tr("BO3 比赛结束");
     else if (m_competitionPhase == QStringLiteral("cancelled"))
@@ -2607,9 +2610,10 @@ void BroadcastWindow::updateCompetitionPresentation()
     const int round = qMax(1, m_competitionState.value(QStringLiteral("roundIndex")).toInt(1));
     m_matchTitle->setText(tr("BO3 · 第 %1 小局 · 胜局 %2 : %3")
                              .arg(round).arg(m_redScore).arg(m_blueScore));
-    m_matchState->setText(m_refereeNotice.isEmpty() ? phaseText
-                          : tr("%1 · %2").arg(phaseText, m_refereeNotice));
-    const bool alert = !m_refereeNotice.isEmpty();
+    // The server notice often repeats the phase name ("开赛倒计时"); show it once.
+    const QString notice = m_refereeNotice == phaseText ? QString() : m_refereeNotice;
+    m_matchState->setText(notice.isEmpty() ? phaseText : tr("%1 · %2").arg(phaseText, notice));
+    const bool alert = !notice.isEmpty();
     if (m_matchState->property("alert").toBool() != alert) {
         m_matchState->setProperty("alert", alert);
         m_matchState->style()->unpolish(m_matchState);
