@@ -65,6 +65,9 @@ public:
     bool locked() const;
     int remainingSeconds(qint64 nowMs) const;
     int roundRemainingSeconds(qint64 nowMs) const;
+    // Exact ms to the running round's deadline; -1 when no round is running.
+    qint64 runningRemainingMs(qint64 nowMs) const
+    { return m_phase == Phase::Running && m_deadline >= 0 ? qMax<qint64>(0, m_deadline - nowMs) : -1; }
     int wins(quint8 team) const;
     Phase phase() const { return m_phase; }
     QString phaseKey() const;

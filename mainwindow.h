@@ -14,6 +14,7 @@
 #include <QMainWindow>
 #include <functional>
 
+class BgmController;
 class CheckinPanel;
 class FieldCamera;
 class FieldCameraBackend;
@@ -34,6 +35,7 @@ class QLineEdit;
 class QScreen;
 class QResizeEvent;
 class QSplitter;
+class QSlider;
 class QSpinBox;
 class QTableWidget;
 class QTabWidget;
@@ -80,6 +82,7 @@ private slots:
     void onToggleManualDamageServer();
     void onShowManualDamageQr();
     void refreshManualDamageUi();
+    void refreshRefereeHpUi();
     void onToggleClientServer();
     void refreshFieldCameraDevices();
     void onToggleFieldCamera();
@@ -144,7 +147,8 @@ private:
     void syncRefereeState();
     qint64 refereeNow() const { return m_monotonicClock ? m_monotonicClock() : m_refereeClock.elapsed(); }
     std::function<qint64()> m_monotonicClock;
-    bool competitionMode() const { return m_useCompetition; }
+    // Formal BO3 is the only rule set (the legacy kill-score mode was removed).
+    static constexpr bool competitionMode() { return true; }
     QVector<RobotManager::RobotInfo> activeMatchRobots() const;
     bool bindCompetitionRobots(QString *error);
     void updateCompetition();
@@ -256,11 +260,24 @@ private:
     bool            m_listening = false;
 
     CompetitionFlow m_competition;
-    bool m_useCompetition = true;
     bool m_ledgerHealthy = true;
-    // No-device debug: formal flow runs without robots (no device binding,
-    // no GAME_START/ACK wait). Never persisted; off on every launch.
+    // No-device debug: skips the "both sides exactly one robot" check. Any
+    // online robots (0, 1 or 2) are bound and get the full match flow; with
+    // none, the round starts without device confirmation. Never persisted.
     bool m_noDeviceDebug = false;
+    // Phase-driven background music on the server PC.
+    BgmController *m_bgm = nullptr;
+    bool m_bgmArmed = false;  // set by new/reset BO3; silent before that after launch
+    QCheckBox *m_bgmEnabledEdit = nullptr;
+    QSlider *m_bgmVolumeEdit = nullptr;
+    QLabel *m_bgmStateLabel = nullptr;
+    void refreshBgm();
+    // Referee console HP control (same ACK-confirmed SET_HP path as the phone page).
+    QSpinBox *m_refHpEdit[2] = {};
+    QPushButton *m_refDamageBtn[2] = {};
+    QPushButton *m_refSetHpBtn[2] = {};
+    QLabel *m_refHpStateLabel = nullptr;
+    void requestRefereeHp(quint8 team, bool deduct);
     QCheckBox *m_noDeviceDebugEdit = nullptr;
     // Formal timing presets (round + intermission length), persisted.
     QVector<MatchTimingPreset> m_timingPresets;
@@ -291,7 +308,9 @@ private:
     bool finishManualDamage(quint32 txid, quint8 type, quint8 robotId, int result); // -1 timeout
     QJsonObject manualDamageState(quint8 team) const;
     QString manualDamageBlockReason(quint8 team, RobotManager::RobotInfo *robot) const;
-    QComboBox *m_ruleProfileEdit = nullptr;
+    // Shared HP change: setHp < 0 deducts the configured amount. ticket 0 =
+    // referee console. Returns an error text, empty when the command was sent.
+    QString startHpChange(quint8 team, int setHp, quint64 ticket, const QString &source);
     QComboBox *m_teamPairEdit = nullptr;
     QPushButton *m_applyTeamPairBtn = nullptr;
     QLabel *m_competitionPhaseLabel = nullptr;
@@ -312,7 +331,6 @@ private:
     QElapsedTimer   m_refereeClock;
     QTimer         *m_refereeTimer = nullptr;
     QCheckBox      *m_redCardDisqualifiesEdit = nullptr;
-    QSpinBox       *m_offlineGraceEdit = nullptr;
     QLabel         *m_refereeStatusLabel = nullptr;
     QPushButton    *m_declareRedBtn = nullptr;
     QPushButton    *m_declareBlueBtn = nullptr;

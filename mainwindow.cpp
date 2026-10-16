@@ -11,6 +11,7 @@
 #include "robotcommander.h"
 #include "robotmanager.h"
 #include "videostreamsize.h"
+#include "bgmcontroller.h"
 
 #include <QCheckBox>
 #include <QColor>
@@ -51,6 +52,8 @@
 #include <QSignalBlocker>
 #include <QSettings>
 #include <QSplitter>
+#include <QScrollArea>
+#include <QSlider>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
@@ -584,13 +587,31 @@ void MainWindow::buildUi()
     timingRow->addWidget(m_timingPresetEdit, 1);
     timingRow->addWidget(m_timingPresetEditBtn);
     matchLayout->addRow(tr("比赛时间"), timingRow);
-    m_noDeviceDebugEdit = new QCheckBox(tr("无车调试（跳过设备检查，仅用于测试）"), matchGroup);
+    m_noDeviceDebugEdit = new QCheckBox(tr("无车调试（不要求双方各一台车，仅用于测试）"), matchGroup);
     m_noDeviceDebugEdit->setObjectName(QStringLiteral("noDeviceDebug"));
-    m_noDeviceDebugEdit->setToolTip(tr("开赛不绑定机器人、不发送 GAME_START、不等待设备确认；"
-                                       "无血量数据，时间到后需裁判手动判定。每次启动默认关闭。"));
+    m_noDeviceDebugEdit->setToolTip(tr("开赛时绑定当前在线的车辆（0~2 台），在线车辆照常收到开赛/结束、"
+                                       "复活与扣血命令；没有车的一方无血量数据，需裁判手动判定。每次启动默认关闭。"));
     m_noDeviceDebugEdit->setStyleSheet(QStringLiteral("QCheckBox:checked { color: #ff9f1a; font-weight: bold; }"));
     connect(m_noDeviceDebugEdit, &QCheckBox::toggled, this, &MainWindow::onNoDeviceDebugToggled);
     matchLayout->addRow(tr("调试"), m_noDeviceDebugEdit);
+    {
+        // Phase-driven BGM on this PC (prepare / match / interlude).
+        auto *bgmRow = new QHBoxLayout;
+        m_bgmEnabledEdit = new QCheckBox(tr("播放"), matchGroup);
+        m_bgmEnabledEdit->setObjectName(QStringLiteral("bgmEnabled"));
+        m_bgmVolumeEdit = new QSlider(Qt::Horizontal, matchGroup);
+        m_bgmVolumeEdit->setObjectName(QStringLiteral("bgmVolume"));
+        m_bgmVolumeEdit->setRange(0, 100);
+        m_bgmVolumeEdit->setAccessibleName(tr("BGM 音量"));
+        m_bgmVolumeEdit->setToolTip(tr("BGM 和倒计时提示音音量"));
+        m_bgmStateLabel = new QLabel(matchGroup);
+        m_bgmStateLabel->setObjectName(QStringLiteral("bgmState"));
+        m_bgmStateLabel->setMinimumWidth(110);
+        bgmRow->addWidget(m_bgmEnabledEdit);
+        bgmRow->addWidget(m_bgmVolumeEdit, 1);
+        bgmRow->addWidget(m_bgmStateLabel);
+        matchLayout->addRow(tr("BGM"), bgmRow);
+    }
     m_competitionPhaseLabel = new QLabel(tr("BO3 · 第1局 · 等待裁判开赛 · 03:00"), matchGroup);
     m_competitionPhaseLabel->setObjectName(QStringLiteral("competitionPhase"));
     m_competitionPhaseLabel->setWordWrap(true);
@@ -641,29 +662,12 @@ void MainWindow::buildUi()
     ruleGrid->setVerticalSpacing(6);
     m_redCardDisqualifiesEdit = new QCheckBox(tr("红牌直接判负"), refereeGroup);
     m_redCardDisqualifiesEdit->setObjectName(QStringLiteral("ruleRedCard"));
-    m_offlineGraceEdit = new QSpinBox(refereeGroup);
-    m_offlineGraceEdit->setObjectName(QStringLiteral("ruleOfflineGrace"));
-    m_offlineGraceEdit->setRange(0, 120);
-    m_offlineGraceEdit->setSuffix(tr(" 秒"));
-    m_offlineGraceEdit->setSpecialValueText(tr("不判负"));
-    m_offlineGraceEdit->setToolTip(tr("比赛进行中一方连续离线超过该时长、且另一方在线时判负；暂停时不计时。"));
-    m_ruleProfileEdit = new QComboBox(refereeGroup);
-    m_ruleProfileEdit->setObjectName(QStringLiteral("ruleProfile"));
-    m_ruleProfileEdit->addItem(tr("正式 BO3 · 复活 / 血量"), true);
-    m_ruleProfileEdit->addItem(tr("旧调试 · 击杀积分"), false);
-    ruleGrid->addWidget(m_ruleProfileEdit, 0, 0);
-    connect(m_ruleProfileEdit, qOverload<int>(&QComboBox::currentIndexChanged), this, &MainWindow::onRefereeRulesChanged);
-    ruleGrid->addWidget(m_redCardDisqualifiesEdit, 0, 1);
-    auto *graceRow = new QHBoxLayout;
-    graceRow->addWidget(new QLabel(tr("离线判负"), refereeGroup));
-    graceRow->addWidget(m_offlineGraceEdit, 1);
-    ruleGrid->addLayout(graceRow, 1, 1);
-    ruleGrid->setColumnStretch(0, 1);
+    // Formal BO3 (revives / HP) is the only rule set; the legacy kill-score
+    // debug mode and its offline-forfeit timer were removed.
+    ruleGrid->addWidget(m_redCardDisqualifiesEdit, 0, 0);
     ruleGrid->setColumnStretch(1, 1);
     refereeLayout->addLayout(ruleGrid);
     connect(m_redCardDisqualifiesEdit, &QCheckBox::toggled, this, &MainWindow::onRefereeRulesChanged);
-    connect(m_offlineGraceEdit, qOverload<int>(&QSpinBox::valueChanged),
-            this, &MainWindow::onRefereeRulesChanged);
 
     auto *verdictActions = new QHBoxLayout;
     verdictActions->setSpacing(6);
@@ -683,10 +687,47 @@ void MainWindow::buildUi()
     verdictActions->addWidget(m_declareBlueBtn, 1);
     verdictActions->addWidget(m_summaryToggleBtn, 1);
     refereeLayout->addLayout(verdictActions);
+
+    // Referee HP control during a round: same ACK-confirmed SET_HP path and
+    // safety checks as the phone page (fresh telemetry, one in flight per side).
+    auto *hpGrid = new QGridLayout;
+    hpGrid->setHorizontalSpacing(6);
+    hpGrid->setVerticalSpacing(4);
+    for (int i = 0; i < 2; ++i) {
+        const quint8 team = quint8(i + 1);
+        const QString key = i == 0 ? QStringLiteral("Red") : QStringLiteral("Blue");
+        auto *side = new QLabel(i == 0 ? tr("红方血量") : tr("蓝方血量"), refereeGroup);
+        side->setStyleSheet(i == 0 ? QStringLiteral("color:#ff6872;font-weight:700;")
+                                   : QStringLiteral("color:#72b4ff;font-weight:700;"));
+        m_refDamageBtn[i] = new QPushButton(refereeGroup);
+        m_refDamageBtn[i]->setObjectName(QStringLiteral("refDamage") + key);
+        m_refHpEdit[i] = new QSpinBox(refereeGroup);
+        m_refHpEdit[i]->setObjectName(QStringLiteral("refHp") + key);
+        m_refHpEdit[i]->setRange(0, 300);
+        m_refHpEdit[i]->setValue(300);
+        m_refHpEdit[i]->setSuffix(tr(" HP"));
+        m_refSetHpBtn[i] = new QPushButton(tr("设为"), refereeGroup);
+        m_refSetHpBtn[i]->setObjectName(QStringLiteral("refSetHp") + key);
+        m_refSetHpBtn[i]->setToolTip(tr("把本方机器人血量直接设为左侧数值；车辆回 ACK 后生效"));
+        connect(m_refDamageBtn[i], &QPushButton::clicked, this, [this, team] { requestRefereeHp(team, true); });
+        connect(m_refSetHpBtn[i], &QPushButton::clicked, this, [this, team] { requestRefereeHp(team, false); });
+        hpGrid->addWidget(side, i, 0);
+        hpGrid->addWidget(m_refDamageBtn[i], i, 1);
+        hpGrid->addWidget(m_refHpEdit[i], i, 2);
+        hpGrid->addWidget(m_refSetHpBtn[i], i, 3);
+    }
+    hpGrid->setColumnStretch(1, 1);
+    hpGrid->setColumnStretch(2, 1);
+    refereeLayout->addLayout(hpGrid);
+    m_refHpStateLabel = new QLabel(refereeGroup);
+    m_refHpStateLabel->setObjectName(QStringLiteral("refHpState"));
+    m_refHpStateLabel->setWordWrap(true);
+    m_refHpStateLabel->setStyleSheet(QStringLiteral("color:#9aa7b2;"));
+    refereeLayout->addWidget(m_refHpStateLabel);
+
     auto *refereeHint = new QLabel(
-        tr("本局击杀对方 +1 分，常规时间内可复活。时间到积分高者胜；"
-           "同分进入 SUDDEN DEATH，下一次单方击杀定胜负。同时击杀各 +1，继续加时。"
-           "裁判判定、红黄牌及离线判负仍优先。"),
+        tr("正式 BO3：每局 3 次复活，时间到按剩余复活次数、再按剩余血量判胜负；"
+           "裁判判定、红黄牌优先。"),
         refereeGroup);
     refereeHint->setWordWrap(true);
     refereeHint->setStyleSheet(QStringLiteral("color: #65717c;"));
@@ -1055,6 +1096,33 @@ void MainWindow::buildUi()
         QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
                     QStringLiteral("Scompetition"), QStringLiteral("ManualDamage"));
         s.setValue(QStringLiteral("amount"), v);
+        refreshRefereeHpUi();
+    });
+
+    // BGM: created after the controls exist; state persists across launches.
+    m_bgm = new BgmController(this);
+    m_bgm->setObjectName(QStringLiteral("bgmController"));
+    {
+        QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                    QStringLiteral("Scompetition"), QStringLiteral("Bgm"));
+        const QSignalBlocker b1(m_bgmEnabledEdit), b2(m_bgmVolumeEdit);
+        m_bgmEnabledEdit->setChecked(s.value(QStringLiteral("enabled"), true).toBool());
+        m_bgmVolumeEdit->setValue(s.value(QStringLiteral("volume"), 70).toInt());
+        m_bgm->setVolume(m_bgmVolumeEdit->value());
+        m_bgm->setEnabled(m_bgmEnabledEdit->isChecked());
+    }
+    connect(m_bgmEnabledEdit, &QCheckBox::toggled, this, [this](bool on) {
+        if (on) m_bgmArmed = true;   // explicitly turning BGM on starts the phase track
+        m_bgm->setEnabled(on);
+        QSettings(QSettings::defaultFormat(), QSettings::UserScope, QStringLiteral("Scompetition"),
+                  QStringLiteral("Bgm")).setValue(QStringLiteral("enabled"), on);
+        refreshBgm();
+    });
+    connect(m_bgmVolumeEdit, &QSlider::valueChanged, this, [this](int v) {
+        m_bgm->setVolume(v);
+        QSettings(QSettings::defaultFormat(), QSettings::UserScope, QStringLiteral("Scompetition"),
+                  QStringLiteral("Bgm")).setValue(QStringLiteral("volume"), v);
+        refreshBgm();
     });
 
     // 设备管理面板：V2 中 team 不再来自数据包，需服务器侧分配
@@ -1226,7 +1294,20 @@ void MainWindow::buildUi()
     m_controlTabs = makeTabs(QStringLiteral("serverControlTabs"));
     m_rightTabs = makeTabs(QStringLiteral("serverRightSidebar"));
     auto *leftMatchPage = makePage({matchGroup,refereeGroup,teamGroup},true);
-    m_leftTabs->addTab(leftMatchPage,tr("比赛 / 裁判 / 队伍"));
+    // The three groups no longer fit 1080p with BGM + referee HP controls;
+    // scroll instead of letting the layout squeeze rows on top of each other.
+    auto *leftScroll = new QScrollArea;
+    leftScroll->setObjectName(QStringLiteral("serverLeftScroll"));
+    leftScroll->setWidgetResizable(true);
+    leftScroll->setFrameShape(QFrame::NoFrame);
+    leftScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    leftScroll->setWidget(leftMatchPage);
+    // Keep the dark dashboard background behind the group titles.
+    leftMatchPage->setObjectName(QStringLiteral("serverLeftMatchPage"));
+    leftScroll->setStyleSheet(QStringLiteral(
+        "QScrollArea#serverLeftScroll, QWidget#serverLeftMatchPage { background: transparent; }"));
+    leftScroll->viewport()->setAutoFillBackground(false);
+    m_leftTabs->addTab(leftScroll,tr("比赛 / 裁判 / 队伍"));
     auto *livePage = makePage({},false);
     auto *liveLayout = qobject_cast<QVBoxLayout *>(livePage->layout());
     m_matchOverview = new QLabel(tr("等待比赛开始 · 红方 0 : 0 蓝方"),livePage);
@@ -1454,9 +1535,22 @@ QVector<RobotManager::RobotInfo> MainWindow::activeMatchRobots() const
 bool MainWindow::bindCompetitionRobots(QString *error)
 {
     if (m_noDeviceDebug) {
-        // No robots are bound: activeMatchRobots() stays empty and
-        // sendGameCommand() finds no eligible device to command.
+        // Debug: bind whatever is online (0, 1 or 2 robots). Each side takes
+        // at most one confirmed V2 robot; sides without a car stay unbound and
+        // the full match flow still runs for the bound ones.
         m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
+        if (!m_listening || !m_robots) return true;
+        for (quint8 team : {quint8(1), quint8(2)}) {
+            for (const auto &r : m_robots->robots()) {
+                if (r.team != team || r.protocolVersion != proto::kVersion2 || !r.online || !r.robotId) continue;
+                QString mac;
+                for (const auto &d : m_robots->devices())
+                    if (d.robotId == r.robotId && d.addressText == r.addressText) mac = d.deviceMac;
+                if (mac.isEmpty() || m_activeDeviceMacs.contains(r.robotId)) continue;
+                m_activeRobotIds.insert(team, r.robotId); m_activeDeviceMacs.insert(r.robotId, mac);
+                break;
+            }
+        }
         return true;
     }
     if (!m_listening || !m_robots) { *error = tr("请先启动 UDP 监听并确认红蓝双方设备"); return false; }
@@ -1555,7 +1649,7 @@ QJsonObject MainWindow::competitionSnapshot() const
 
 void MainWindow::updateCompetition()
 {
-    if (!competitionMode() || !m_broadcast || !m_ruleProfileEdit) return;
+    if (!m_broadcast) return;
     const qint64 now = refereeNow();
     if (m_competition.phase() == CompetitionFlow::Phase::Running) {
         const auto robots = activeMatchRobots();
@@ -1569,7 +1663,7 @@ void MainWindow::updateCompetition()
     if (event == CompetitionFlow::Event::StartDevices) {
         QString error;
         if (!bindCompetitionRobots(&error)) { m_competition.cancelStart(); showActionResult(error, QStringLiteral("error")); }
-        else if (m_noDeviceDebug) {
+        else if (m_noDeviceDebug && m_activeRobotIds.isEmpty()) {
             // No devices to command or wait for: confirm the start immediately.
             m_competition.confirmStart(now);
             m_referee.beginRound({}, now);
@@ -1586,9 +1680,11 @@ void MainWindow::updateCompetition()
         }
     }
     if (m_competition.phase() == CompetitionFlow::Phase::Starting) {
-        bool ready = m_startAcknowledged.size() == 2;
+        // Formal: both sides. No-device debug: every robot that was bound.
+        const int expected = m_noDeviceDebug ? m_activeRobotIds.size() : 2;
+        bool ready = expected > 0 && m_startAcknowledged.size() == expected;
         const auto robots = activeMatchRobots();
-        ready = ready && robots.size() == 2;
+        ready = ready && robots.size() == expected;
         for (const auto &r : robots)
             ready = ready && m_startAcknowledged.value(r.robotId) && r.online && r.alive
                     && r.hp == 300 && r.lastSeenMs >= m_startRequestEpochMs;
@@ -1598,8 +1694,11 @@ void MainWindow::updateCompetition()
             m_lastRoundSummary = {};
             m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement(); m_broadcast->clearCards();
             persistCompetitionLedger();
-            showActionResult(tr("双方设备已确认，正式小局开始 · %1")
-                                 .arg(matchtiming::durationText(m_competition.roundMs() / 1000)));
+            showActionResult(m_noDeviceDebug
+                                 ? tr("[无车调试] %1 台设备已确认，小局开始 · %2").arg(expected)
+                                       .arg(matchtiming::durationText(m_competition.roundMs() / 1000))
+                                 : tr("双方设备已确认，正式小局开始 · %1")
+                                       .arg(matchtiming::durationText(m_competition.roundMs() / 1000)));
         } else if (now - m_startRequestMonotonicMs > 3000) {
             m_competition.cancelStart(); sendGameCommand(false);
             showActionResult(tr("设备开赛状态未确认，已发送结束命令，请检查后重新开赛"), QStringLiteral("error"));
@@ -1637,7 +1736,6 @@ void MainWindow::refreshCompetitionUi()
     m_importTeamsBtn->setEnabled(!locked); m_nextTeamBtn->setEnabled(!locked && !m_teamPairs.isEmpty());
     m_applyTeamPairBtn->setEnabled(!locked && !m_teamPairs.isEmpty());
     m_redTeamNameEdit->setReadOnly(locked); m_blueTeamNameEdit->setReadOnly(locked);
-    m_ruleProfileEdit->setEnabled(!locked);
     // One BO3 always uses one timing: switching is blocked from the first
     // countdown through the last intermission (CompetitionFlow::locked()).
     if (m_timingPresetEdit) m_timingPresetEdit->setEnabled(!m_competition.timingLocked());
@@ -1645,6 +1743,44 @@ void MainWindow::refreshCompetitionUi()
         m_noDeviceDebugEdit->setEnabled(phase != CompetitionFlow::Phase::Countdown && phase != CompetitionFlow::Phase::Starting
             && phase != CompetitionFlow::Phase::Running && phase != CompetitionFlow::Phase::AwaitingDecision);
     m_broadcast->setCompetitionState(competitionSnapshot());
+    refreshBgm();
+    refreshRefereeHpUi();
+}
+
+void MainWindow::refreshBgm()
+{
+    if (!m_bgm) return;
+    using P = CompetitionFlow::Phase;
+    using T = BgmController::Track;
+    const P phase = m_competition.phase();
+    // Match track: from the countdown through the live round (incl. device
+    // confirmation). It is started explicitly by onToggleMatch so the voice
+    // countdown lines up; here it is only kept, never restarted.
+    T track = m_bgm->track();
+    switch (phase) {
+    case P::Countdown: case P::Starting: case P::Running:
+        if (track != T::Match) track = T::Prepare;   // e.g. BGM enabled mid-round: wait for next countdown
+        break;
+    case P::AwaitingDecision:
+        break;                                       // keep whatever plays until the verdict
+    case P::Intermission: case P::Cancelled:
+        track = T::Prepare; break;
+    case P::MatchFinished:
+        track = T::Interlude; break;
+    case P::Ready:
+        // App start: silent until new/reset BO3 (m_bgmArmed). After a reset,
+        // or once an intermission ends, the prepare track plays.
+        track = m_bgmArmed ? T::Prepare : T::None; break;
+    }
+    m_bgm->setTrack(track);
+    const qint64 left = m_competition.runningRemainingMs(refereeNow());
+    if (left >= 0) m_bgm->updateRoundRemainingMs(left);
+    if (m_bgmStateLabel) {
+        const QString name = track == T::Prepare ? tr("准备") : track == T::Match ? tr("比赛")
+                           : track == T::Interlude ? tr("场间") : tr("未播放");
+        const QString text = m_bgm->enabled() ? tr("%1 · %2%").arg(name).arg(m_bgm->volume()) : tr("已关闭");
+        if (m_bgmStateLabel->text() != text) m_bgmStateLabel->setText(text);
+    }
 }
 
 void MainWindow::saveRoundResult(const QJsonObject &summary)
@@ -1667,58 +1803,27 @@ void MainWindow::saveRoundResult(const QJsonObject &summary)
 void MainWindow::onToggleMatch()
 {
     if (!m_broadcast) return;
-    if (competitionMode()) {
-        if (m_competition.phase() == CompetitionFlow::Phase::Countdown) {
-            m_competition.cancelCountdown();
-            showActionResult(tr("已取消开赛倒计时，未发送开赛指令"));
-            updateCompetition(); return;
-        }
-        QString error;
-        if (m_competition.phase() != CompetitionFlow::Phase::Ready
-            && m_competition.phase() != CompetitionFlow::Phase::Cancelled) {
-            showActionResult(tr("当前阶段不能开赛；局间准备结束后由裁判确认，无技术暂停"), QStringLiteral("info")); return;
-        }
-        if (!m_ledgerHealthy || !bindCompetitionRobots(&error)) {
-            showActionResult(m_ledgerHealthy ? error : tr("审批账本异常，禁止正式开赛"), QStringLiteral("error")); return;
-        }
-        m_competition.beginCountdown(refereeNow());
-        m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement();
-        persistCompetitionLedger(); updateCompetition();
-        showActionResult(tr("5 秒开赛倒计时已开始；归零后等待双方设备确认"));
-        return;
+    if (m_competition.phase() == CompetitionFlow::Phase::Countdown) {
+        m_competition.cancelCountdown();
+        showActionResult(tr("已取消开赛倒计时，未发送开赛指令"));
+        updateCompetition(); return;
     }
-
-    const qint64 now = refereeNow();
-    if (m_broadcast->isMatchRunning()) {
-        m_broadcast->pauseMatch();
-        m_referee.pause(now);
-        showActionResult(tr("比赛已暂停 · 未向机器人发送重置命令"));
-        // V2: 比赛暂停只影响 HUD，不向 ESP32 发命令
-    } else if (m_referee.phase() == MatchReferee::Phase::Paused
-               && !m_broadcast->roundEnded()
-               && (m_broadcast->remainingSeconds() > 0 || m_referee.suddenDeath())) {
-        // Resume: GAME_START would reset the robots to full HP mid-round.
-        m_broadcast->startMatch();
-        m_referee.resume(now);
-        showActionResult(tr("比赛已继续"));
-    } else if (m_referee.isRunning() && m_broadcast->remainingSeconds() == 0) {
-        // Buzzer confirmation/SD is still this round, never send GAME_START.
-        showActionResult(tr("正在进行结束判定 / 加时，无需重复开始"), QStringLiteral("info"));
-        return;
-    } else {
-        m_broadcast->startMatch();
-        m_referee.beginRound(m_robots ? m_robots->robots()
-                                      : QVector<RobotManager::RobotInfo>(), now);
-        if (m_summaryToggleBtn) {
-            m_summaryToggleBtn->setEnabled(false);
-            m_summaryToggleBtn->setText(tr("展开赛后数据"));
-        }
-        // V2: 对所有已分配 robot_id 单播 GAME_START，ESP32 收到后自设 HP=300
-        sendGameCommand(true);
+    QString error;
+    if (m_competition.phase() != CompetitionFlow::Phase::Ready
+        && m_competition.phase() != CompetitionFlow::Phase::Cancelled) {
+        showActionResult(tr("当前阶段不能开赛；局间准备结束后由裁判确认，无技术暂停"), QStringLiteral("info")); return;
     }
-    syncRefereeState();
-    refreshRefereeStatus();
-    publishMatchState();
+    if (!m_ledgerHealthy || !bindCompetitionRobots(&error)) {
+        showActionResult(m_ledgerHealthy ? error : tr("审批账本异常，禁止正式开赛"), QStringLiteral("error")); return;
+    }
+    m_competition.beginCountdown(refereeNow());
+    m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement();
+    // The voice countdown in the match track starts with the HUD countdown.
+    if (m_bgm) m_bgm->restartMatch();
+    persistCompetitionLedger(); updateCompetition();
+    showActionResult(m_noDeviceDebug && m_activeRobotIds.size() < 2
+                         ? tr("[无车调试] 5 秒开赛倒计时已开始 · 已绑定 %1 台设备").arg(m_activeRobotIds.size())
+                         : tr("5 秒开赛倒计时已开始；归零后等待双方设备确认"));
 }
 
 void MainWindow::sendGameCommand(bool start)
@@ -1913,53 +2018,32 @@ void MainWindow::loadRefereeRules()
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
                        QStringLiteral("Scompetition"), QStringLiteral("MatchReferee"));
     const MatchReferee::Rules defaults;
-    const QSignalBlocker bp(m_ruleProfileEdit);
-    m_useCompetition = settings.value(QStringLiteral("competitionMode"), true).toBool();
-    m_ruleProfileEdit->setCurrentIndex(m_useCompetition ? 0 : 1);
     const QSignalBlocker b2(m_redCardDisqualifiesEdit);
-    const QSignalBlocker b4(m_offlineGraceEdit);
     m_redCardDisqualifiesEdit->setChecked(
         settings.value(QStringLiteral("redCardDisqualifies"), defaults.redCardDisqualifies).toBool());
-    m_offlineGraceEdit->setValue(m_useCompetition ? 0 : settings.value(QStringLiteral("offlineForfeitSeconds"), defaults.offlineForfeitMs / 1000).toInt());
     onRefereeRulesChanged();
 }
 
 void MainWindow::onRefereeRulesChanged()
 {
-    if (!m_redCardDisqualifiesEdit || !m_offlineGraceEdit) {
+    if (!m_redCardDisqualifiesEdit) {
         return;
     }
-    const bool requested = m_ruleProfileEdit ? m_ruleProfileEdit->currentData().toBool() : true;
-    if (m_competition.locked() || m_referee.isRunning() || m_referee.phase() == MatchReferee::Phase::Paused) {
-        const QSignalBlocker blocker(m_ruleProfileEdit);
-        m_ruleProfileEdit->setCurrentIndex(m_useCompetition ? 0 : 1);
-        showActionResult(tr("比赛中不能切换规则"), QStringLiteral("error")); return;
-    }
-    const bool changed = requested != m_useCompetition;
-    m_useCompetition = requested;
-    if (changed) {
-        m_competition.resetSeries(); m_referee.reset(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
-        if (m_broadcast) m_broadcast->resetMatch();
-        if (m_matchServer) m_matchServer->clearRegistrations(tr("比赛规则模式已变更，请重新登记"));
-    }
     MatchReferee::Rules rules = m_referee.rules();
-    rules.scoringMode = competitionMode() ? MatchReferee::ScoringMode::RemainingResources : MatchReferee::ScoringMode::KillScore;
+    rules.scoringMode = MatchReferee::ScoringMode::RemainingResources;
     rules.redCardDisqualifies = m_redCardDisqualifiesEdit->isChecked();
-    rules.offlineForfeitMs = competitionMode() ? 0 : m_offlineGraceEdit->value() * 1000;
-    m_offlineGraceEdit->setEnabled(!competitionMode());
-    m_redScoreEdit->setReadOnly(competitionMode()); m_blueScoreEdit->setReadOnly(competitionMode());
-    if (m_redScoreLabel) m_redScoreLabel->setText(competitionMode() ? tr("红方 BO3 胜局") : tr("红方击杀积分"));
-    if (m_blueScoreLabel) m_blueScoreLabel->setText(competitionMode() ? tr("蓝方 BO3 胜局") : tr("蓝方击杀积分"));
-    if (m_broadcast) m_broadcast->setClockDuration(competitionMode() ? m_competition.roundMs() / 1000 : 60);
-    if (m_timingPresetEdit) m_timingPresetEdit->setVisible(competitionMode());
-    if (m_timingPresetEditBtn) m_timingPresetEditBtn->setVisible(competitionMode());
+    rules.offlineForfeitMs = 0;
+    m_redScoreEdit->setReadOnly(true); m_blueScoreEdit->setReadOnly(true);
+    if (m_redScoreLabel) m_redScoreLabel->setText(tr("红方 BO3 胜局"));
+    if (m_blueScoreLabel) m_blueScoreLabel->setText(tr("蓝方 BO3 胜局"));
+    if (m_broadcast) m_broadcast->setClockDuration(m_competition.roundMs() / 1000);
     m_referee.setRules(rules);
 
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
                        QStringLiteral("Scompetition"), QStringLiteral("MatchReferee"));
-    settings.setValue(QStringLiteral("competitionMode"), competitionMode());
+    settings.remove(QStringLiteral("competitionMode"));
+    settings.remove(QStringLiteral("offlineForfeitSeconds"));
     settings.setValue(QStringLiteral("redCardDisqualifies"), rules.redCardDisqualifies);
-    settings.setValue(QStringLiteral("offlineForfeitSeconds"), m_offlineGraceEdit->value());
     settings.sync();
     reportAction(settings.status() == QSettings::NoError ? tr("裁判规则已应用并保存") : tr("裁判规则已应用，但保存失败"),
                  settings.status() == QSettings::NoError ? QStringLiteral("success") : QStringLiteral("error"));
@@ -2076,8 +2160,9 @@ void MainWindow::onNoDeviceDebugToggled(bool enabled)
     m_commander->cancelPendingType(proto::TypeReviveApprove);
     m_competition.resetSeries(); m_referee.reset(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
     persistCompetitionLedger();
+    m_bgmArmed = true;
     if (m_broadcast) m_broadcast->resetMatch();
-    onLogMessage(enabled ? tr("[调试] 已开启无车调试：开赛跳过设备检查，不发送设备命令；BO3 已重置")
+    onLogMessage(enabled ? tr("[调试] 已开启无车调试：开赛不要求双方各一台车，在线车辆照常下发命令；BO3 已重置")
                          : tr("[调试] 已关闭无车调试，恢复正式设备检查；BO3 已重置"));
     showActionResult(enabled ? tr("无车调试已开启 · 仅用于测试，正式比赛前请关闭")
                              : tr("无车调试已关闭 · 开赛需双方设备在线"),
@@ -2144,11 +2229,10 @@ void MainWindow::onResetMatch()
     if (competitionMode() && m_competition.locked()) {
         showActionResult(tr("请先终止当前小局；BO3 局间准备不能误重置或换队"), QStringLiteral("error")); return;
     }
-    if (competitionMode()) {
-        m_commander->cancelPendingType(proto::TypeReviveApprove);
-        m_competition.resetSeries(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
-        persistCompetitionLedger();
-    }
+    m_commander->cancelPendingType(proto::TypeReviveApprove);
+    m_competition.resetSeries(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
+    persistCompetitionLedger();
+    m_bgmArmed = true;   // prepare music plays from here until the countdown
     if (m_broadcast)
         m_broadcast->resetMatch();
     m_referee.reset();
@@ -2619,6 +2703,7 @@ void MainWindow::applyTeamPair(int index, bool resetMatch)
     if (competitionMode() && resetMatch) {
         m_competition.resetSeries(); m_activeRobotIds.clear(); m_activeDeviceMacs.clear();
         persistCompetitionLedger();
+        m_bgmArmed = true;
         if (m_matchServer) m_matchServer->clearRegistrations(tr("已切换对阵，请重新登记"));
         if (m_checkinPanel) m_checkinPanel->startNewSession();
     }

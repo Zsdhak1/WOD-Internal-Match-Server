@@ -1,8 +1,8 @@
-// Manual HP deduction from phones on the LAN.
-// Firmware only supports SET_HP (absolute), so a deduction is
-// "fresh telemetry HP - amount" sent as SET_HP and reported to the phone only
-// after the car ACKs it. To limit races with real hits: one in-flight
-// deduction per side, and the robot's last uplink must be <= 300 ms old.
+// Manual HP control: phones on the LAN (deduct) and the referee console
+// (deduct or set an absolute HP). Firmware only supports SET_HP (absolute),
+// so a deduction is "fresh telemetry HP - amount" sent as SET_HP and reported
+// only after the car ACKs it. To limit races with real hits: one in-flight
+// change per side, and the robot's last uplink must be <= 300 ms old.
 #include "mainwindow.h"
 #include "broadcastwindow.h"
 #include "protocol.h"
@@ -29,11 +29,11 @@ QString sideName(quint8 team) { return team == 1 ? QObject::tr("红方") : QObje
 
 QString MainWindow::manualDamageBlockReason(quint8 team, RobotManager::RobotInfo *robot) const
 {
-    if (!competitionMode()) return tr("仅正式比赛模式可用");
-    if (m_noDeviceDebug) return tr("无车调试中没有设备可扣血");
     if (m_competition.phase() != CompetitionFlow::Phase::Running) return tr("仅小局进行中可扣血");
     const quint8 robotId = m_activeRobotIds.value(team);
-    if (!robotId) return tr("本方未绑定机器人");
+    // No-device debug binds only the cars that are online; a side without
+    // one simply has nothing to control.
+    if (!robotId) return m_noDeviceDebug ? tr("无车调试：本方没有连接车辆") : tr("本方未绑定机器人");
     RobotManager::RobotInfo found;
     bool exists = false;
     for (const auto &r : activeMatchRobots())
@@ -61,10 +61,8 @@ QJsonObject MainWindow::manualDamageState(quint8 team) const
         {"hp", robot.robotId ? robot.hp : -1},
         {"available", blocked.isEmpty() && !busy},
         {"reason", busy ? tr("上一次扣血确认中") : blocked},
-        {"message", competitionMode()
-             ? tr("第 %1 局 · %2 · %3:%4").arg(m_competition.roundIndex()).arg(m_competition.phaseText())
-                   .arg(seconds / 60, 2, 10, QLatin1Char('0')).arg(seconds % 60, 2, 10, QLatin1Char('0'))
-             : tr("非正式比赛模式")},
+        {"message", tr("第 %1 局 · %2 · %3:%4").arg(m_competition.roundIndex()).arg(m_competition.phaseText())
+                        .arg(seconds / 60, 2, 10, QLatin1Char('0')).arg(seconds % 60, 2, 10, QLatin1Char('0'))},
     };
     return o;
 }
@@ -75,25 +73,73 @@ void MainWindow::onManualDamageRequested(quint64 ticket, quint8 team, const QStr
         m_damageServer->completeDamage(ticket, {{"ok", false}, {"message", message}});
         onLogMessage(tr("[手动扣血] %1 拒绝 · %2 · 来自 %3").arg(sideName(team), message, peer));
     };
-    if (m_manualDamage.contains(team)) { fail(tr("上一次扣血还在等车辆确认，请稍候")); return; }
+    const QString error = startHpChange(team, -1, ticket, peer);
+    if (!error.isEmpty()) fail(error);
+}
+
+QString MainWindow::startHpChange(quint8 team, int setHp, quint64 ticket, const QString &source)
+{
+    if (m_manualDamage.contains(team)) return tr("上一次血量修改还在等车辆确认，请稍候");
     RobotManager::RobotInfo robot;
     const QString blocked = manualDamageBlockReason(team, &robot);
-    if (!blocked.isEmpty()) { fail(blocked); return; }
+    if (!blocked.isEmpty()) return blocked;
+    // setHp < 0: deduct the configured amount from the latest telemetry HP.
     const int amount = m_damageAmountEdit ? m_damageAmountEdit->value() : 0;
-    const int toHp = qMax(0, robot.hp - amount);
+    const int toHp = setHp >= 0 ? qBound(0, setHp, 300) : qMax(0, robot.hp - amount);
     const quint32 txid = m_commander ? m_commander->sendSetHp(robot.robotId, quint16(toHp)) : 0;
-    if (!txid) { fail(tr("命令发送失败，请检查 UDP 监听")); return; }
-    m_manualDamage.insert(team, {ticket, team, robot.robotId, txid, robot.hp, toHp, peer});
+    if (!txid) return tr("命令发送失败，请检查 UDP 监听");
+    m_manualDamage.insert(team, {ticket, team, robot.robotId, txid, robot.hp, toHp, source});
     // Backstop: if the commander drops the pending command without a timeout
-    // signal (listener stopped, pending cancelled), never leave the phone hanging.
+    // signal (listener stopped, pending cancelled), never leave a request hanging.
     QTimer::singleShot(1500, this, [this, team, txid, robotId = robot.robotId] {
         const auto it = m_manualDamage.constFind(team);
         if (it != m_manualDamage.constEnd() && it->txid == txid)
             finishManualDamage(txid, proto::TypeSetHp, robotId, -1);
     });
-    onLogMessage(tr("[手动扣血] %1 机器人 %2 · HP %3 → %4 · 已发送，等待 ACK（txid=%5）· 来自 %6")
-                     .arg(sideName(team)).arg(robot.robotId).arg(robot.hp).arg(toHp).arg(txid).arg(peer));
+    onLogMessage(tr("[%1] %2 机器人 %3 · HP %4 → %5 · 已发送，等待 ACK（txid=%6）· 来自 %7")
+                     .arg(setHp >= 0 ? tr("设定血量") : tr("手动扣血"), sideName(team))
+                     .arg(robot.robotId).arg(robot.hp).arg(toHp).arg(txid).arg(source));
     refreshManualDamageUi();
+    return {};
+}
+
+void MainWindow::requestRefereeHp(quint8 team, bool deduct)
+{
+    if (team != 1 && team != 2) return;
+    const int setHp = deduct ? -1 : (m_refHpEdit[team - 1] ? m_refHpEdit[team - 1]->value() : -1);
+    if (!deduct && setHp < 0) return;
+    const QString error = startHpChange(team, setHp, 0, tr("裁判控制台"));
+    if (!error.isEmpty()) {
+        showActionResult(tr("%1%2失败 · %3").arg(sideName(team), deduct ? tr("扣血") : tr("设定血量"), error),
+                         QStringLiteral("error"));
+        onLogMessage(tr("[裁判血量] %1 拒绝 · %2").arg(sideName(team), error));
+    } else {
+        showActionResult(tr("%1%2已发送，等待车辆确认").arg(sideName(team), deduct ? tr("扣血") : tr("设定血量")),
+                         QStringLiteral("info"));
+    }
+    refreshRefereeHpUi();
+}
+
+void MainWindow::refreshRefereeHpUi()
+{
+    if (!m_refHpStateLabel) return;
+    const int amount = m_damageAmountEdit ? m_damageAmountEdit->value() : 0;
+    QStringList states;
+    for (int i = 0; i < 2; ++i) {
+        const quint8 team = quint8(i + 1);
+        RobotManager::RobotInfo robot;
+        const QString blocked = manualDamageBlockReason(team, &robot);
+        const bool busy = m_manualDamage.contains(team);
+        const bool ok = blocked.isEmpty() && !busy;
+        m_refDamageBtn[i]->setText(tr("扣 %1 血").arg(amount));
+        m_refDamageBtn[i]->setEnabled(ok);
+        m_refSetHpBtn[i]->setEnabled(ok);
+        m_refHpEdit[i]->setEnabled(ok);
+        const QString hp = robot.robotId && robot.hp >= 0 ? QString::number(robot.hp) : tr("--");
+        states << tr("%1 HP %2 · %3").arg(sideName(team), hp, busy ? tr("确认中") : (ok ? tr("可操作") : blocked));
+    }
+    const QString text = states.join(QStringLiteral("   "));
+    if (m_refHpStateLabel->text() != text) m_refHpStateLabel->setText(text);
 }
 
 bool MainWindow::finishManualDamage(quint32 txid, quint8 type, quint8 robotId, int result)
@@ -104,22 +150,30 @@ bool MainWindow::finishManualDamage(quint32 txid, quint8 type, quint8 robotId, i
         const ManualDamage d = it.value();
         m_manualDamage.erase(it);
         QJsonObject reply;
+        QString text;
         if (result == 0) {
-            reply = {{"ok", true}, {"hp", d.toHp},
-                     {"message", tr("已扣 %1 血 · HP %2 → %3").arg(d.fromHp - d.toHp).arg(d.fromHp).arg(d.toHp)}};
-            onLogMessage(tr("[手动扣血] %1 机器人 %2 已确认 · HP %3 → %4")
-                             .arg(sideName(d.team)).arg(d.robotId).arg(d.fromHp).arg(d.toHp));
+            text = d.toHp <= d.fromHp ? tr("已扣 %1 血 · HP %2 → %3").arg(d.fromHp - d.toHp).arg(d.fromHp).arg(d.toHp)
+                                      : tr("已设定血量 · HP %1 → %2").arg(d.fromHp).arg(d.toHp);
+            reply = {{"ok", true}, {"hp", d.toHp}, {"message", text}};
+            onLogMessage(tr("[血量修改] %1 机器人 %2 已确认 · HP %3 → %4 · 来自 %5")
+                             .arg(sideName(d.team)).arg(d.robotId).arg(d.fromHp).arg(d.toHp).arg(d.peer));
         } else if (result < 0) {
-            reply = {{"ok", false}, {"message", tr("车辆确认超时，扣血结果未知，请看控制台血量")}};
-            onLogMessage(tr("[手动扣血] %1 机器人 %2 确认超时，结果未知（txid=%3）")
+            text = tr("车辆确认超时，血量修改结果未知，请看控制台血量");
+            reply = {{"ok", false}, {"message", text}};
+            onLogMessage(tr("[血量修改] %1 机器人 %2 确认超时，结果未知（txid=%3）")
                              .arg(sideName(d.team)).arg(d.robotId).arg(txid));
         } else {
-            reply = {{"ok", false}, {"message", tr("车辆拒绝扣血（错误码 %1）").arg(result)}};
-            onLogMessage(tr("[手动扣血] %1 机器人 %2 拒绝，错误码 %3")
+            text = tr("车辆拒绝修改血量（错误码 %1）").arg(result);
+            reply = {{"ok", false}, {"message", text}};
+            onLogMessage(tr("[血量修改] %1 机器人 %2 拒绝，错误码 %3")
                              .arg(sideName(d.team)).arg(d.robotId).arg(result));
         }
-        if (m_damageServer) m_damageServer->completeDamage(d.ticket, reply);
+        // ticket 0 = referee console; phone requests are answered over HTTP.
+        if (d.ticket && m_damageServer) m_damageServer->completeDamage(d.ticket, reply);
+        else showActionResult(sideName(d.team) + QStringLiteral(" · ") + text,
+                              result == 0 ? QStringLiteral("success") : QStringLiteral("error"));
         refreshManualDamageUi();
+        refreshRefereeHpUi();
         return true;
     }
     return false;

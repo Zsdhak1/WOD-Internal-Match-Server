@@ -57,3 +57,5 @@ __pycache__/
 !.env.example
 *.dmp
 
+# Raw source videos for BGM extraction (large; extracted audio is in Assets/bgm)
+/Assets/未处理视频/

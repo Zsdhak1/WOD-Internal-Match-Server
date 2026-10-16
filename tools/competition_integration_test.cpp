@@ -57,8 +57,7 @@ int main(int argc,char **argv)
         check(settings.isValid(),"settings isolation failed");
         qint64 now=1000;
         MainWindow main(nullptr,new FakeFieldCameraBackend,[&]{return now;}); main.resize(1920,1080);main.show();settle();
-        check(child<QComboBox>(main,"ruleProfile")->currentData().toBool(),"formal mode is not default");
-        check(child<QSpinBox>(main,"ruleOfflineGrace")->value()==0,"formal inherited automatic offline loss");
+        check(!main.findChild<QComboBox*>("ruleProfile") && !main.findChild<QSpinBox*>("ruleOfflineGrace"),"legacy rule mode still present");
         QFile teams(settings.path()+"/teams.csv");check(teams.open(QIODevice::WriteOnly),"team fixture");teams.write("red,blue\nA1,A2\nB1,B2\n");teams.close();QString error;
         check(main.importTeamTable(teams.fileName(),&error),"team import failed");
         child<QComboBox>(main,"teamPairSelection")->setCurrentIndex(1);

@@ -54,11 +54,13 @@ foreach ($component in $names.Keys) {
     New-Item -ItemType Directory -Path (Join-Path $folder 'tools'), (Join-Path $folder 'Assets'), (Join-Path $folder 'docs') -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $source 'tools\ffmpeg') -Destination (Join-Path $folder 'tools') -Recurse
     Copy-Item -LiteralPath (Join-Path $source 'Assets\gamefinishvideo') -Destination (Join-Path $folder 'Assets') -Recurse
+    # Phase BGM plays on the server PC only.
+    if ($component -eq 'Server') { Copy-Item -LiteralPath (Join-Path $source 'Assets\bgm') -Destination (Join-Path $folder 'Assets') -Recurse }
     Copy-Item -LiteralPath (Join-Path $source 'README.md'), (Join-Path $source 'CHANGELOG.md') -Destination $folder
     Copy-Item -Path (Join-Path $source 'docs\*.md') -Destination (Join-Path $folder 'docs')
     Write-Utf8 (Join-Path $folder 'qt.conf') "[Paths]`nPrefix=.`nPlugins=.`n"
     Write-Utf8 (Join-Path $folder 'Start.cmd') "@echo off`r`ncd /d `"%~dp0`"`r`nstart `"`" `"%~dp0$exe`"`r`n"
-    Write-Utf8 (Join-Path $folder 'START-HERE.txt') "Windows 10/11 x64 portable $component. Extract the complete ZIP, then run Start.cmd or $exe.`r`nQt/plugins, MSVC CRT, static FFmpeg and settlement assets are bundled. No Qt/Python install required.`r`nCurrent kill-score/SD rules are not the official BO3 model. See README and docs.`r`n"
+    Write-Utf8 (Join-Path $folder 'START-HERE.txt') "Windows 10/11 x64 portable $component. Extract the complete ZIP, then run Start.cmd or $exe.`r`nQt/plugins, MSVC CRT, static FFmpeg and settlement assets are bundled. No Qt/Python install required.`r`nFormal BO3 (revives / HP) is the only rule set. See README and docs.`r`n"
 }
 # results-web is deprecated: only the Server and Client desktop packages are built.
 Run $PythonExecutable @((Join-Path $PSScriptRoot 'verify-windows-packages.py'), '--directory', $export)

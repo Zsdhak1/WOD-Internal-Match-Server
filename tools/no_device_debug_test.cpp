@@ -52,7 +52,7 @@ int main(int argc, char **argv)
         auto *bw = broadcast();
         auto *debug = child<QCheckBox>(main, "noDeviceDebug");
         auto *phase = child<QLabel>(main, "competitionPhase");
-        check(child<QComboBox>(main, "ruleProfile")->currentData().toBool(), "formal mode is not default");
+        check(!main.findChild<QComboBox*>("ruleProfile"), "legacy rule mode still present");
         check(!debug->isChecked(), "debug mode must be off by default");
 
         // 1. Default formal mode: no UDP listener, no robots -> start refused.

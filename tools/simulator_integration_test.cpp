@@ -491,8 +491,8 @@ int main(int argc,char **argv)
         qInfo() << "Constructing server";
         auto *fieldBackend = new FakeFieldCameraBackend;
         MainWindow server(nullptr, fieldBackend); settle();
-        // This existing suite exercises the preserved legacy kill/SD mode.
-        child<QComboBox>(server,"ruleProfile")->setCurrentIndex(1); settle();
+
+
         {
             auto *camera = child<FieldCamera>(server,"fieldCameraController");
             auto *devices = child<QComboBox>(server,"fieldCameraDevice");
@@ -585,6 +585,15 @@ int main(int argc,char **argv)
                         // The new referee pane deliberately scrolls; its narrow and clipboard layouts
                         // are covered by RefereeEntryPanelTest, not the legacy all-buttons-in-view rule.
                         if (workspace->objectName()==QStringLiteral("refereeEntryPanel")) continue;
+                        // The match/referee/team column also scrolls (BGM + referee HP rows);
+                        // it must scroll vertically only, never horizontally.
+                        if (auto *scroll = qobject_cast<QScrollArea *>(workspace)) {
+                            check(scroll->horizontalScrollBarPolicy()==Qt::ScrollBarAlwaysOff
+                                  && scroll->widget()->minimumSizeHint().width() <= scroll->viewport()->width() + 1,
+                                  QStringLiteral("Left column needs horizontal scrolling at %1x%2")
+                                      .arg(size.width()).arg(size.height()));
+                            continue;
+                        }
                         const QRect bounds(QPoint(0,0),workspace->size());
                         for (auto *button : workspace->findChildren<QAbstractButton *>()) {
                             if (!button->isVisible() || button->width()==0) continue;
@@ -784,107 +793,8 @@ int main(int argc,char **argv)
         }
         qInfo()<<"PASS: ID conflicts, old-ID cleanup and command IDs across server restarts";
 
-        {
-            // Full automatic-verdict path: real UDP simulators, GAME_START /
-            // GAME_END, knockout confirmation, auto score and TCP summary sync.
-            auto *bw = serverBroadcast();
-            child<QSpinBox>(server,"ruleOfflineGrace")->setValue(10);
-            invoke(server,"onResetMatch");
-            check(match->start(0),"TCP server restart failed");
-            child<QLineEdit>(client,"clientServerPort")->setText(QString::number(match->port()));
-            invoke(client,"onLoginClicked");
-            waitFor([&]{return rowFor(*table,71)>=0 && rowFor(*table,72)>=0
-                               && table->item(rowFor(*table,71),5)->text()!=QStringLiteral("离线")
-                               && table->item(rowFor(*table,72),5)->text()!=QStringLiteral("离线");},
-                    "Robots not online before match");
-            invoke(server,"onToggleMatch");
-            check(bw->isMatchRunning(),"Match did not start");
-            waitFor([&]{return child<QSpinBox>(red,"simHp")->value()==300
-                               && child<QSpinBox>(blue,"simHp")->value()==300;},"GAME_START not applied");
-            waitFor([&]{return client.isMatchRunning();}, "Client not running before combat preview");
-            settle(250); // Establish player HP baselines before the first drop.
-            invoke(blue,"onSendHit");
-            waitFor([&]{return table->item(rowFor(*table,72),2)->text()==QStringLiteral("280");},"Hit not reported");
-            client.resize(1920,1080); client.show(); settle(30);
-            auto *playerOverlay = child<QWidget>(client, "playerCombatOverlay");
-            check(playerOverlay->isVisible() && playerOverlay->testAttribute(Qt::WA_TransparentForMouseEvents),
-                  "Registered player overlay missing or blocking input");
-            check(playerOverlay->size() == client.centralWidget()->size(),
-                  "Player reticle remained at previous window size after resize");
-            check(child<QWidget>(client, "centerHud")->property("compositeAssetLoaded").toBool(),
-                  "Player client not using shared composite HUD");
-            check(client.grab().save(outDir+QStringLiteral("/client-playing-1920x1080.png")),
-                  "Cannot save registered player UI");
-            invoke(red,"onSendDeath");
-            waitFor([&]{return bw->blueScore()==1;},"Kill point not applied");
-            settle(400);
-            check(!bw->roundEnded() && bw->isMatchRunning(), "Regulation kill ended match");
-            waitFor([&]{return client.blueScore()==1;}, "Kill point not mirrored to client");
-            invoke(server,"onTimeExpired");
-            waitFor([&]{return bw->roundEnded();},"Score timeout produced no verdict");
-            const QJsonObject summary=bw->matchSummary();
-            check(bw->settlementType()==QStringLiteral("bluewin"),"Wrong knockout settlement");
-            check(summary.value(QStringLiteral("winner")).toInt()==2
-                  && summary.value(QStringLiteral("reason")).toString()==QStringLiteral("kill_score"),"Wrong summary verdict");
-            check(summary.value(QStringLiteral("red")).toObject().value(QStringLiteral("damageDealt")).toInt()==20
-                  && summary.value(QStringLiteral("blue")).toObject().value(QStringLiteral("damageDealt")).toInt()==300,
-                  "Wrong damage statistics");
-            check(bw->blueScore()==1 && bw->redScore()==0,"Auto score not applied");
-            waitFor([&]{return !child<QCheckBox>(blue,"simShoot")->isChecked();},"GAME_END not sent after verdict");
-            waitFor([&]{return client.roundEnded() && client.settlementType()==QStringLiteral("defeated")
-                               && client.matchSummary().value(QStringLiteral("winner")).toInt()==2;},
-                    "Client did not receive verdict summary");
-            check(child<QPushButton>(server,"summaryToggle")->isEnabled(),"Summary toggle disabled");
-            invoke(server,"onToggleSummary");
-            check(bw->summaryExpanded(),"Summary did not expand");
-            waitFor([&]{return client.summaryExpanded();},"Client did not mirror summary expansion");
-
-            // Next round keeps the series score; pause/resume must not resend
-            // GAME_START (it would heal the robots mid-round).
-            invoke(server,"onToggleMatch");
-            check(bw->isMatchRunning() && !bw->roundEnded() && bw->blueScore()==0 && bw->redScore()==0,"Next round retained kill score");
-            check(bw->matchSummary().isEmpty(),"Previous summary survived next round");
-            waitFor([&]{return child<QSpinBox>(red,"simHp")->value()==300;},"Second GAME_START not applied");
-            invoke(blue,"onSendHit");
-            waitFor([&]{return table->item(rowFor(*table,72),2)->text()==QStringLiteral("280");},"Second hit not reported");
-            invoke(server,"onToggleMatch");check(!bw->isMatchRunning(),"Pause failed");
-            invoke(server,"onToggleMatch");settle(300);
-            check(bw->isMatchRunning() && child<QSpinBox>(blue,"simHp")->value()==280,"Resume re-sent GAME_START");
-            invoke(server,"onTerminateMatch");
-            check(bw->roundEnded() && bw->settlementType()==QStringLiteral("termination")
-                  && bw->blueScore()==0 && bw->redScore()==0,"Termination changed score or settlement");
-            // Score tie enters SD without restart commands, healing or end.
-            invoke(server,"onToggleMatch");
-            waitFor([&]{return child<QSpinBox>(red,"simHp")->value()==300
-                               && child<QSpinBox>(blue,"simHp")->value()==300;}, "SD round start failed");
-            invoke(blue,"onSendHit");
-            waitFor([&]{return table->item(rowFor(*table,72),2)->text()==QStringLiteral("280");}, "SD pre-hit failed");
-            bw->setMatchState(0, false);
-            invoke(server,"onTimeExpired");
-            waitFor([&]{return bw->suddenDeath() && bw->isMatchRunning()
-                               && client.suddenDeath() && client.isMatchRunning();}, "SD not synced to client");
-            check(!bw->roundEnded() && bw->remainingSeconds()==0
-                      && child<QSpinBox>(blue,"simHp")->value()==280
-                      && child<QCheckBox>(blue,"simShoot")->isChecked(), "SD healed/stopped robot");
-            child<QSpinBox>(red,"simHeat")->setValue(80); settle(200);
-            // This console scenario registers robot 1 but simulates 71/72;
-            // identity-specific combat feedback is checked in the player test.
-            check(client.grab().save(outDir+QStringLiteral("/client-sudden-death-1920x1080.png")), "Cannot save SD HUD");
-            invoke(server,"onToggleMatch");
-            check(!bw->isMatchRunning() && bw->suddenDeath(), "SD pause reset phase");
-            invoke(server,"onToggleMatch"); settle(200);
-            check(bw->isMatchRunning() && bw->suddenDeath() && bw->remainingSeconds()==0
-                      && child<QSpinBox>(blue,"simHp")->value()==280, "SD resume resent GAME_START");
-            invoke(red,"onSendDeath");
-            waitFor([&]{return bw->roundEnded() && client.roundEnded();}, "SD kill did not finish");
-            check(bw->blueScore()==1 && bw->redScore()==0
-                      && bw->matchSummary().value(QStringLiteral("reason")).toString()==QStringLiteral("sudden_death_kill"),
-                  "SD verdict/score wrong");
-            invoke(client,"onLogoutClicked");match->stop();
-            invoke(server,"onResetMatch");
-            check(bw->redScore()==0 && bw->blueScore()==0 && !bw->roundEnded(),"Reset failed");
-        }
-        qInfo()<<"PASS: kill points, score timeout, sudden death, GAME_END, summary sync, resume without GAME_START";
+        // The legacy kill-score / sudden-death scenario was removed with that mode;
+        // the formal BO3 flow is covered by competition_integration.
 
         const QByteArray savedMac=deviceMac(red);invoke(red,"onToggleRunning");
         waitFor([&]{return table->item(rowFor(*table,71),5)->text()==QStringLiteral("离线");},"Offline status did not expire");

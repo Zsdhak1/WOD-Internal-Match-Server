@@ -71,7 +71,7 @@ set(PROJECT_SOURCES
         manualdamageserver.h
         manualdamagepage.cpp
         mainwindow_manualdamage.cpp
-        armorthresholddialog.cpp
+        armorthresholddialog.cpp bgmcontroller.cpp bgmcontroller.h
         armorthresholddialog.h
         videoformatselect.h
         videostreamsize.h
@@ -259,7 +259,7 @@ add_executable(SimulatorIntegrationTest
     matchserver.cpp matchserver.h
     matchtimingpresets.cpp matchtimingpresets.h matchtimingdialog.cpp matchtimingdialog.h
     manualdamageserver.cpp manualdamageserver.h manualdamagepage.cpp mainwindow_manualdamage.cpp third_party/qrcodegen/qrcodegen.cpp third_party/qrcodegen/qrcodegen.hpp
-    armorthresholddialog.cpp armorthresholddialog.h)
+    armorthresholddialog.cpp bgmcontroller.cpp bgmcontroller.h armorthresholddialog.h)
 target_include_directories(SimulatorIntegrationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(SimulatorIntegrationTest PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -325,6 +325,11 @@ add_executable(ArmorThresholdTest tools/armor_threshold_test.cpp ${_competition_
 target_include_directories(ArmorThresholdTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ArmorThresholdTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(BgmSingleCarTest tools/bgm_single_car_test.cpp ${_competition_integration_sources})
+target_include_directories(BgmSingleCarTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(BgmSingleCarTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_dependencies(BgmSingleCarTest bgm_assets)
 add_executable(MatchTimingPresetTest tools/match_timing_preset_test.cpp ${_competition_integration_sources})
 target_include_directories(MatchTimingPresetTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(MatchTimingPresetTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -340,10 +345,11 @@ add_test(NAME no_device_debug COMMAND NoDeviceDebugTest)
 add_test(NAME match_timing_presets COMMAND MatchTimingPresetTest)
 add_test(NAME manual_damage COMMAND ManualDamageTest)
 add_test(NAME armor_threshold COMMAND ArmorThresholdTest)
+add_test(NAME bgm_single_car COMMAND BgmSingleCarTest)
 add_test(NAME native_video COMMAND NativeVideoTest)
 set_tests_properties(native_video PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug
-    match_timing_presets manual_damage armor_threshold PROPERTIES
+    match_timing_presets manual_damage armor_threshold bgm_single_car PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES
@@ -439,6 +445,12 @@ if(WIN32)
                 "$<TARGET_FILE_DIR:Scompetition>/Assets/gamefinishvideo"
         VERBATIM
     )
+    add_custom_target(bgm_assets
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Scompetition>/Assets/bgm"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/Assets/bgm" "$<TARGET_FILE_DIR:Scompetition>/Assets/bgm"
+        VERBATIM
+    )
+    add_dependencies(Scompetition bgm_assets)
     add_dependencies(Scompetition settlement_assets)
     add_dependencies(ScompetitionClient settlement_assets)
 
@@ -477,6 +489,10 @@ if(WIN32 AND WINDEPLOYQT_EXECUTABLE)
     install(CODE "${_windeployqt_install_code}")
 endif()
 
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Assets/bgm/"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}/Assets/bgm"
+    FILES_MATCHING PATTERN "*.m4a" PATTERN "*.wav"
+)
 install(DIRECTORY "${SETTLEMENT_ASSET_DIR}/"
     DESTINATION "${CMAKE_INSTALL_BINDIR}/Assets/gamefinishvideo"
     FILES_MATCHING PATTERN "*.mp4"

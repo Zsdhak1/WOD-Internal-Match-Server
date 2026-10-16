@@ -41,6 +41,9 @@ def verify(root):
                          'broadcast_layout.ini', 'build-info.json', 'qt.conf'):
             assert (folder/required).is_file(), f'{name}: missing {required}'
         assert list((folder/'Assets/gamefinishvideo').glob('*.mp4')), 'Missing settlement video assets'
+        if name == 'Server':
+            for bgm in ('bgm_prepare.m4a', 'bgm_match.m4a', 'bgm_interlude.m4a', 'countdown_beep.wav'):
+                assert (folder/'Assets/bgm'/bgm).is_file(), f'Server: missing Assets/bgm/{bgm}'
         assert len(list(folder.glob('Scompetition*.exe'))) == 1, 'Mixed desktop components'
         x64(folder/exe)
         x64(folder/'tools/ffmpeg/ffmpeg.exe')
