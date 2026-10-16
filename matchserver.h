@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QJsonObject>
 #include <QObject>
+#include <QSize>
 #include <QString>
 #include <QVector>
 
@@ -88,6 +89,9 @@ private:
     QHash<quint8, QUdpSocket *> m_videoSockets;
     QHash<quint8, QProcess *> m_videoDecoders;
     QHash<quint8, QByteArray> m_videoBuffers;
+    QHash<quint8, QSize> m_videoSizes;    // announced by client (video_format)
+    QHash<quint8, QSize> m_decoderSizes;  // size the running decoder emits
+    QSize videoSize(quint8 team) const;
 };
 
 #endif // MATCHSERVER_H

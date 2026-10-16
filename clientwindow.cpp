@@ -1,4 +1,5 @@
 #include "clientwindow.h"
+#include "videoformatselect.h"
 
 #include "matchprotocol.h"
 
@@ -1525,33 +1526,11 @@ void ClientWindow::startVideoPreview()
     m_captureSession->setCamera(m_camera);
     m_captureSession->setVideoSink(m_videoSink);
 
-    // Keep 1280x720, but do not impose an artificial frame-rate cap here.
-    // Pick the highest advertised frame rate and pass that rate to FFmpeg.
+    // Native resolution: the largest format that still reaches 30 FPS
+    // (highest FPS among equals). The stream keeps that size; only the
+    // small previews are downscaled.
     {
-        const auto formats = selected.videoFormats();
-        const auto chooseFormat = [&formats](bool requireArgb) {
-            QCameraFormat best;
-            for (const QCameraFormat &format : formats) {
-                if (format.resolution() != QSize(1280, 720))
-                    continue;
-                if (requireArgb
-                    && format.pixelFormat() != QVideoFrameFormat::Format_ARGB8888) {
-                    continue;
-                }
-                if (best.isNull()
-                    || format.maxFrameRate() > best.maxFrameRate()
-                    || (format.maxFrameRate() == best.maxFrameRate()
-                        && requireArgb
-                        && best.pixelFormat() != QVideoFrameFormat::Format_ARGB8888)) {
-                    best = format;
-                }
-            }
-            return best;
-        };
-
-        QCameraFormat preferred = chooseFormat(true);
-        if (preferred.isNull())
-            preferred = chooseFormat(false);
+        const QCameraFormat preferred = videoformat::chooseNative(selected.videoFormats(), true);
         if (!preferred.isNull()) {
             if (preferred.maxFrameRate() > 0)
                 m_streamInputFps = qBound(1, qRound(preferred.maxFrameRate()), 120);
@@ -1571,16 +1550,11 @@ void ClientWindow::startVideoPreview()
     m_camera->start();
 
     // === Optional upstream: push H.264 to the server over UDP ===
-    // Kept in a separate ffmpeg child so the local preview stays responsive
-    // even when the network is congested.
-    if (m_registered && m_videoPort > 0 && m_serverEdit)
-        startStreaming();
-
-    const bool streaming = m_streamProcess && m_streamProcess->state() != QProcess::NotRunning;
-    setVideoStatus(streaming
-                       ? tr("H.264 推流中：%1 · UDP %2").arg(sourceName).arg(m_videoPort)
-                       : tr("正在预览：%1").arg(sourceName),
-                   QColor(QStringLiteral("#72d39a")));
+    // The encoder needs the real frame size, so it starts on the first camera
+    // frame (onCameraFrame) rather than here.
+    m_streamSize = QSize();
+    m_streamRetryAtMs = 0;
+    setVideoStatus(tr("正在预览：%1").arg(sourceName), QColor(QStringLiteral("#72d39a")));
 }
 
 void ClientWindow::stopVideoPreview()
@@ -1604,10 +1578,16 @@ void ClientWindow::stopVideoPreview()
     }
 }
 
-void ClientWindow::startStreaming()
+void ClientWindow::startStreaming(const QSize &frameSize)
 {
     if (m_streamProcess)
         return; // already running
+    // yuv420p needs even dimensions; odd native sizes lose one edge pixel.
+    const QSize size(frameSize.width() & ~1, frameSize.height() & ~1);
+    if (!videoformat::validStreamSize(size)) {
+        appendLog(tr("视频尺寸 %1x%2 不支持推流").arg(frameSize.width()).arg(frameSize.height()));
+        return;
+    }
 
     const QString executable = ffmpegExecutable();
     if (executable.isEmpty()) {
@@ -1642,9 +1622,10 @@ void ClientWindow::startStreaming()
     if (server.contains(QLatin1Char(':')) && !server.startsWith(QLatin1Char('[')))
         server = QStringLiteral("[%1]").arg(server);
     const QString udpUrl = QStringLiteral(
-        "udp://%1:%2?pkt_size=1316&buffer_size=65536&connect=1")
+        "udp://%1:%2?pkt_size=1316&buffer_size=1048576&connect=1")
                                .arg(server)
                                .arg(m_videoPort);
+    const int bitrate = videoformat::streamBitrateKbps(size);
 
     // Feed raw BGRA frames into ffmpeg's stdin. The camera is opened by Qt
     // (MediaFoundation), so we cannot also have ffmpeg open it via dshow —
@@ -1655,22 +1636,20 @@ void ClientWindow::startStreaming()
         QStringLiteral("-loglevel"), QStringLiteral("error"),
         QStringLiteral("-f"), QStringLiteral("rawvideo"),
         QStringLiteral("-pixel_format"), QStringLiteral("bgra"),
-        QStringLiteral("-video_size"), QStringLiteral("1280x720"),
+        QStringLiteral("-video_size"), QStringLiteral("%1x%2").arg(size.width()).arg(size.height()),
         QStringLiteral("-framerate"), QString::number(m_streamInputFps),
         QStringLiteral("-use_wallclock_as_timestamps"), QStringLiteral("1"),
         QStringLiteral("-i"), QStringLiteral("pipe:0"),
         QStringLiteral("-an"),
-        // The server renders this stream at 640x360. Encoding at 960x540 is
-        // visually sufficient there and materially reduces x264 CPU and UDP
-        // packet pressure compared with 720p.
-        QStringLiteral("-vf"), QStringLiteral("scale=960:540:flags=fast_bilinear"),
+        // Native resolution end to end: the broadcast screen shows the
+        // source as captured. Bitrate scales with resolution.
         QStringLiteral("-c:v"), QStringLiteral("libx264"),
         QStringLiteral("-preset"), QStringLiteral("ultrafast"),
         QStringLiteral("-tune"), QStringLiteral("zerolatency"),
         QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
-        QStringLiteral("-b:v"), QStringLiteral("2500k"),
-        QStringLiteral("-maxrate"), QStringLiteral("2500k"),
-        QStringLiteral("-bufsize"), QStringLiteral("5000k"),
+        QStringLiteral("-b:v"), QStringLiteral("%1k").arg(bitrate),
+        QStringLiteral("-maxrate"), QStringLiteral("%1k").arg(bitrate),
+        QStringLiteral("-bufsize"), QStringLiteral("%1k").arg(bitrate * 2),
         QStringLiteral("-g"), QStringLiteral("30"),
         QStringLiteral("-keyint_min"), QStringLiteral("30"),
         QStringLiteral("-sc_threshold"), QStringLiteral("0"),
@@ -1684,7 +1663,64 @@ void ClientWindow::startStreaming()
         appendLog(tr("无法启动 ffmpeg 推流：%1").arg(process->errorString()));
         process->deleteLater();
         m_streamProcess = nullptr;
+        return;
     }
+    m_streamSize = size;
+    // The server decodes raw frames and must know the exact size up front.
+    sendMessage({{QStringLiteral("type"), QStringLiteral("video_format")},
+                 {QStringLiteral("width"), size.width()},
+                 {QStringLiteral("height"), size.height()},
+                 {QStringLiteral("fps"), m_streamInputFps}});
+    setVideoStatus(tr("H.264 推流中：%1 · %2x%3 · %4 Mbps · UDP %5")
+                       .arg(m_activeSourceName).arg(size.width()).arg(size.height())
+                       .arg(bitrate / 1000).arg(m_videoPort),
+                   QColor(QStringLiteral("#72d39a")));
+}
+
+void ClientWindow::feedStream(const QImage &image)
+{
+    if (!m_registered || m_videoPort <= 0 || !m_serverEdit || m_activeSourceId.isEmpty())
+        return;
+    if (!m_streamProcess) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now < m_streamRetryAtMs) return;
+        startStreaming(image.size());
+        if (!m_streamProcess) { m_streamRetryAtMs = now + 5000; return; }
+    }
+    if (m_streamProcess->state() != QProcess::Running)
+        return;
+    // Camera renegotiated another size: restart at the new native size.
+    const QSize even(image.width() & ~1, image.height() & ~1);
+    if (even != m_streamSize) {
+        stopStreaming();
+        startStreaming(image.size());
+        if (!m_streamProcess || m_streamProcess->state() != QProcess::Running) return;
+    }
+    const qint64 frameBytes = qint64(m_streamSize.width()) * m_streamSize.height() * 4;
+    if (m_streamProcess->bytesToWrite() > frameBytes * 2) {
+        ++m_streamFramesDropped;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastStreamDropLogMs >= 1000) {
+            m_lastStreamDropLogMs = now;
+            qWarning().noquote()
+                << QStringLiteral("推流队列拥塞，已丢弃 %1 帧，当前积压 %2 KB")
+                       .arg(m_streamFramesDropped)
+                       .arg(m_streamProcess->bytesToWrite() / 1024);
+        }
+        return;
+    }
+    // ARGB32 rows are tightly packed (width*4 is 4-aligned), so a frame of
+    // exactly m_streamSize is one contiguous write. Crop odd edges via copy().
+    QImage frame = image.format() == QImage::Format_ARGB32 || image.format() == QImage::Format_RGB32
+                           || image.format() == QImage::Format_ARGB32_Premultiplied
+                       ? image : image.convertToFormat(QImage::Format_ARGB32);
+    if (frame.size() != m_streamSize)
+        frame = frame.copy(QRect(QPoint(0, 0), m_streamSize));
+    const qint64 written = m_streamProcess->write(
+        reinterpret_cast<const char *>(frame.constBits()), frame.sizeInBytes());
+    if (written != frame.sizeInBytes())
+        qWarning().noquote() << QStringLiteral("推流写入不完整: %1/%2")
+                                    .arg(written).arg(frame.sizeInBytes());
 }
 
 void ClientWindow::stopStreaming()
@@ -1734,51 +1770,9 @@ void ClientWindow::onCameraFrame(const QVideoFrame &frame)
     if (m_registered && !m_activeSourceId.isEmpty())
         setSourceFrame(m_activeSourceId, image);
 
-    // Feed the same frame to the upstream encoder when streaming is active.
-    // Frames arrive in whatever pixel format/resolution the camera negotiated;
-    // we only convert when the format differs from ARGB32 or the size is not
-    // 1280x720 — in the common case this is a single memcpy into the pipe.
-    if (m_streamProcess && m_streamProcess->state() == QProcess::Running) {
-        const bool bgraCompatible = image.format() == QImage::Format_ARGB32
-                                    || image.format() == QImage::Format_RGB32
-                                    || image.format() == QImage::Format_ARGB32_Premultiplied;
-        const bool needsConvert = !bgraCompatible;
-        const bool needsScale = image.width() != 1280 || image.height() != 720;
-        const qint64 maxQueuedBytes = qint64(1280) * 720 * 4 * 2;
-        if (m_streamProcess->bytesToWrite() > maxQueuedBytes) {
-            ++m_streamFramesDropped;
-            const qint64 now = QDateTime::currentMSecsSinceEpoch();
-            if (now - m_lastStreamDropLogMs >= 1000) {
-                m_lastStreamDropLogMs = now;
-                qWarning().noquote()
-                    << QStringLiteral("推流队列拥塞，已丢弃 %1 帧，当前积压 %2 KB")
-                           .arg(m_streamFramesDropped)
-                           .arg(m_streamProcess->bytesToWrite() / 1024);
-            }
-            return;
-        }
-        if (!needsConvert && !needsScale) {
-            const qint64 written = m_streamProcess->write(
-                reinterpret_cast<const char *>(image.constBits()),
-                image.sizeInBytes());
-            if (written != image.sizeInBytes())
-                qWarning().noquote() << QStringLiteral("推流写入不完整: %1/%2")
-                                            .arg(written).arg(image.sizeInBytes());
-        } else {
-            QImage rgba = needsConvert
-                              ? image.convertToFormat(QImage::Format_ARGB32)
-                              : image;
-            if (needsScale)
-                rgba = rgba.scaled(1280, 720, Qt::IgnoreAspectRatio,
-                                   Qt::FastTransformation);
-            const qint64 written = m_streamProcess->write(
-                reinterpret_cast<const char *>(rgba.constBits()),
-                rgba.sizeInBytes());
-            if (written != rgba.sizeInBytes())
-                qWarning().noquote() << QStringLiteral("推流写入不完整: %1/%2")
-                                            .arg(written).arg(rgba.sizeInBytes());
-        }
-    }
+    // Feed the native-size frame to the upstream encoder (started lazily on
+    // the first frame so ffmpeg is told the real camera resolution).
+    feedStream(image);
 }
 
 void ClientWindow::showFramePreview(const QImage &frame)
@@ -1803,8 +1797,11 @@ void ClientWindow::showFramePreview(const QImage &frame)
             return;
         if (!label->isVisible())
             return;
-        const QPixmap pixmap = QPixmap::fromImage(frame).scaled(
-            label->size(), Qt::KeepAspectRatio, Qt::FastTransformation);
+        // Previews stay at <=720p regardless of the native capture size;
+        // scale the image first so a 4K frame is not uploaded as a pixmap.
+        const QSize target = label->size().boundedTo(videoformat::previewBound(frame.size()));
+        const QPixmap pixmap = QPixmap::fromImage(
+            frame.scaled(target, Qt::KeepAspectRatio, Qt::FastTransformation));
         label->setText(QString());
         label->setPixmap(pixmap);
     };

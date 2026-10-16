@@ -88,7 +88,8 @@ private:
     void startVideoPreview();
     void stopVideoPreview();
     void scheduleVideoRestart();
-    void startStreaming();
+    void startStreaming(const QSize &frameSize);
+    void feedStream(const QImage &image);
     void stopStreaming();
     void onCameraFrame(const QVideoFrame &frame);
     void showFramePreview(const QImage &frame);
@@ -113,6 +114,8 @@ private:
     quint64 m_streamFramesDropped = 0;
     quint64 m_framesSinceStats = 0;
     int m_streamInputFps = 30;
+    QSize m_streamSize;   // native size the encoder was started with (even-aligned)
+    qint64 m_streamRetryAtMs = 0; // throttle restarts when ffmpeg is missing/failed
     QVector<QPair<QString, QString>> m_videoDevices;
     bool m_registered = false;
     bool m_loginInProgress = false;

@@ -73,6 +73,8 @@ set(PROJECT_SOURCES
         mainwindow_manualdamage.cpp
         armorthresholddialog.cpp
         armorthresholddialog.h
+        videoformatselect.h
+        videostreamsize.h
         third_party/qrcodegen/qrcodegen.cpp
         third_party/qrcodegen/qrcodegen.hpp
         refereeentrypanel.cpp
@@ -316,6 +318,9 @@ add_executable(ManualDamageTest tools/manual_damage_test.cpp ${_competition_inte
 target_include_directories(ManualDamageTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ManualDamageTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(NativeVideoTest tools/native_video_test.cpp matchserver.cpp matchserver.h matchprotocol.h videostreamsize.h robotmanager.cpp robotmanager.h)
+target_include_directories(NativeVideoTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(NativeVideoTest PRIVATE Qt${QT_VERSION_MAJOR}::Network Qt${QT_VERSION_MAJOR}::Gui)
 add_executable(ArmorThresholdTest tools/armor_threshold_test.cpp ${_competition_integration_sources})
 target_include_directories(ArmorThresholdTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ArmorThresholdTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -335,6 +340,8 @@ add_test(NAME no_device_debug COMMAND NoDeviceDebugTest)
 add_test(NAME match_timing_presets COMMAND MatchTimingPresetTest)
 add_test(NAME manual_damage COMMAND ManualDamageTest)
 add_test(NAME armor_threshold COMMAND ArmorThresholdTest)
+add_test(NAME native_video COMMAND NativeVideoTest)
+set_tests_properties(native_video PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug
     match_timing_presets manual_damage armor_threshold PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)

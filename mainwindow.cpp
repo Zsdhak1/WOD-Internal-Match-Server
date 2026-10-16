@@ -10,6 +10,7 @@
 #include "responsiveui.h"
 #include "robotcommander.h"
 #include "robotmanager.h"
+#include "videostreamsize.h"
 
 #include <QCheckBox>
 #include <QColor>
@@ -2980,7 +2981,10 @@ void MainWindow::onSourceFrameUpdated(const QString &sourceId)
             m_programMonitor->setPixmap(QPixmap());
             m_programMonitor->setText(tr("节目监看 · %1 · 无信号").arg(m_programSourceEdit->currentText()));
         } else {
-            m_programMonitor->setPixmap(QPixmap::fromImage(programFrame).scaled(m_programMonitor->size(),Qt::KeepAspectRatio,Qt::SmoothTransformation));
+            // Monitor preview is capped at 720p; the broadcast screen keeps native.
+            const QSize target = m_programMonitor->size().boundedTo(videoformat::previewBound(programFrame.size()));
+            m_programMonitor->setPixmap(QPixmap::fromImage(
+                programFrame.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
         }
     }
     if (!thumb) return;
@@ -2990,8 +2994,8 @@ void MainWindow::onSourceFrameUpdated(const QString &sourceId)
         thumb->setText(tr("无信号"));
         return;
     }
-    thumb->setPixmap(QPixmap::fromImage(frame).scaled(
-        thumb->size(), Qt::KeepAspectRatioByExpanding, Qt::FastTransformation));
+    thumb->setPixmap(QPixmap::fromImage(frame.scaled(
+        thumb->size(), Qt::KeepAspectRatioByExpanding, Qt::FastTransformation)));
 }
 
 void MainWindow::updateProgramSourceList()

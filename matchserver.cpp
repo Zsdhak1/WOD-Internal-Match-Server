@@ -1,6 +1,7 @@
 #include "matchserver.h"
 
 #include "matchprotocol.h"
+#include "videostreamsize.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
@@ -23,10 +24,10 @@ namespace {
 constexpr quint8 kDefaultRobotId = 1;
 constexpr quint8 kRedTeam = 1;
 constexpr quint8 kBlueTeam = 2;
-// Keep the transport bounded: the GUI always renders only the newest frame.
-constexpr int kVideoWidth = 640;
-constexpr int kVideoHeight = 360;
-constexpr int kVideoBytesPerFrame = kVideoWidth * kVideoHeight * 4;
+// Default decode size until the client reports its native stream size
+// (video_format). Clients older than this change always sent 960x540.
+constexpr int kLegacyVideoWidth = 960;
+constexpr int kLegacyVideoHeight = 540;
 
 QString teamName(quint8 team)
 {
@@ -118,6 +119,7 @@ void MatchServer::clearRegistrations(const QString &reason)
     m_teamSessions.clear();
     for (quint8 side : {quint8(1), quint8(2)}) stopVideoDecoder(side);
     m_videoBuffers.clear();
+    m_videoSizes.clear();
     emitVideoSources();
     emit clientCountChanged(0);
     emit logMessage(tr("[对阵切换] 已撤销旧选手登记，请双方重新登记"));
@@ -220,7 +222,8 @@ void MatchServer::onVideoReadyRead(quint8 team)
         // packets at once rather than dribbling bytes into a full pipe. TS
         // packets are self-contained 188-byte cells so we can discard any
         // prefix safely — the decoder will resync at the next sync byte.
-        if (decoder->bytesToWrite() >= 128 * 1024) {
+        // ~0.25 s of the highest bitrate (12 Mbps) before declaring backlog.
+        if (decoder->bytesToWrite() >= 512 * 1024) {
             // A raw MPEG-TS pipe cannot be flushed in place. Restart the
             // decoder so packets already queued in QProcess do not keep the
             // display permanently behind the live edge.
@@ -280,6 +283,8 @@ void MatchServer::startVideoDecoder(quint8 team)
     // Drop any half-written frame a previous attempt may have left behind so
     // the first consumeVideoOutput call sees a clean stream boundary.
     m_videoBuffers.remove(team);
+    const QSize size = videoSize(team);
+    m_decoderSizes.insert(team, size);
     decoder->start(executable, {
         QStringLiteral("-hide_banner"),
         QStringLiteral("-loglevel"), QStringLiteral("error"),
@@ -293,10 +298,17 @@ void MatchServer::startVideoDecoder(quint8 team)
         QStringLiteral("-an"),
         QStringLiteral("-f"), QStringLiteral("rawvideo"),
         QStringLiteral("-pix_fmt"), QStringLiteral("bgra"),
-        QStringLiteral("-s"), QStringLiteral("%1x%2").arg(kVideoWidth).arg(kVideoHeight),
+        // Pin the output to the announced native size so the raw byte stream
+        // always splits into whole frames (a no-op scale when sizes match).
+        QStringLiteral("-s"), QStringLiteral("%1x%2").arg(size.width()).arg(size.height()),
         QStringLiteral("-vsync"), QStringLiteral("0"),
         QStringLiteral("pipe:1")
     });
+}
+
+QSize MatchServer::videoSize(quint8 team) const
+{
+    return m_videoSizes.value(team, QSize(kLegacyVideoWidth, kLegacyVideoHeight));
 }
 
 void MatchServer::stopVideoDecoder(quint8 team)
@@ -320,6 +332,10 @@ void MatchServer::consumeVideoOutput(quint8 team)
 
     QByteArray &buffer = m_videoBuffers[team];
     buffer.append(decoder->readAllStandardOutput());
+    const QSize size = m_decoderSizes.value(team, QSize(kLegacyVideoWidth, kLegacyVideoHeight));
+    const int kVideoWidth = size.width();
+    const int kVideoHeight = size.height();
+    const int kVideoBytesPerFrame = kVideoWidth * kVideoHeight * 4;
     // The UI only needs the newest frame. Keep a bounded number of complete
     // frames so a slow consumer cannot turn decoder output into latency.
     const int maxBufferedBytes = kVideoBytesPerFrame * 3;
@@ -422,6 +438,7 @@ void MatchServer::onSocketDisconnected(QTcpSocket *socket)
     if (it != m_sessions.end()) {
         if (it->registered && m_teamSessions.value(it->team) == socket) {
             m_teamSessions.remove(it->team);
+            m_videoSizes.remove(it->team);   // next client announces its own size
             emit logMessage(QStringLiteral("[登记] %1 已断开 (%2)")
                                 .arg(teamName(it->team), socketTag(socket)));
         }
@@ -543,6 +560,25 @@ void MatchServer::processMessage(QTcpSocket *socket, const QJsonObject &message)
         emit logMessage(QStringLiteral("[视频源] %1 选择 %2 (%3)")
                             .arg(teamName(sessionIt->team), sessionIt->sourceName, sessionIt->sourceId));
         emitVideoSources();
+    } else if (type == QStringLiteral("video_format")) {
+        // Native stream size announced by the client before its first packet.
+        const QSize size(message.value(QStringLiteral("width")).toInt(),
+                         message.value(QStringLiteral("height")).toInt());
+        if (!videoformat::validStreamSize(size)) {
+            sendError(socket, tr("视频尺寸无效: %1x%2").arg(size.width()).arg(size.height()));
+            return;
+        }
+        const quint8 team = sessionIt->team;
+        const bool changed = m_videoSizes.value(team) != size;
+        m_videoSizes.insert(team, size);
+        // A running decoder emits fixed-size frames: restart it at the new size.
+        if (changed && m_videoDecoders.contains(team)) {
+            stopVideoDecoder(team);
+            m_videoBuffers.remove(team);
+        }
+        emit logMessage(QStringLiteral("[视频源] %1 原始分辨率 %2x%3 @ %4 FPS")
+                            .arg(teamName(team)).arg(size.width()).arg(size.height())
+                            .arg(message.value(QStringLiteral("fps")).toInt()));
     } else if (type == QStringLiteral("logout")) {
         socket->disconnectFromHost();
     } else {

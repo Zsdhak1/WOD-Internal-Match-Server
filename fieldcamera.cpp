@@ -1,4 +1,5 @@
 #include "fieldcamera.h"
+#include "videoformatselect.h"
 
 #include <QCamera>
 #include <QCameraDevice>
@@ -43,20 +44,9 @@ public:
         m_sink = new QVideoSink(this);
         m_session->setCamera(m_camera);
         m_session->setVideoSink(m_sink);
-        // Prefer 720p near 30 FPS rather than max FPS (USB bandwidth / CPU).
-        // Other resolutions remain supported; no advertised format is assumed.
-        QCameraFormat best;
-        double bestScore = -1e20;
-        for (const auto &format : selected.videoFormats()) {
-            if (format.maxFrameRate() <= 0 || format.resolution().isEmpty()) continue;
-            const QSize size = format.resolution();
-            const double distance = qAbs(size.width() - 1280) + qAbs(size.height() - 720);
-            const double fpsDistance = format.minFrameRate() <= 30 && format.maxFrameRate() >= 30
-                                           ? 0 : qMin(qAbs(format.minFrameRate() - 30),
-                                                      qAbs(format.maxFrameRate() - 30));
-            const double score = -distance - fpsDistance * 40;
-            if (best.isNull() || score > bestScore) { best = format; bestScore = score; }
-        }
+        // Broadcast uses the source's native resolution: the largest format
+        // that still reaches 30 FPS (previews downscale to <=720p themselves).
+        const QCameraFormat best = videoformat::chooseNative(selected.videoFormats(), false);
         if (!best.isNull()) m_camera->setCameraFormat(best);
         const auto generation = m_generation;
         connect(m_sink, &QVideoSink::videoFrameChanged, this,
