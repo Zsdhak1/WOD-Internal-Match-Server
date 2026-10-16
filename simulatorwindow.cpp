@@ -204,6 +204,17 @@ void SimulatorWindow::buildUi()
     robotForm->addRow(QString(), m_aliveEdit);
     robotForm->addRow(QString(), m_shootEdit);
     robotForm->addRow(QString(), m_powerOnEdit);
+    m_motionEdit = new QComboBox(robotGroup);
+    m_motionEdit->setObjectName(QStringLiteral("simMotion"));
+    m_motionEdit->addItem(tr("未知"), 0);
+    m_motionEdit->addItem(tr("静止"), 1);
+    m_motionEdit->addItem(tr("运动"), 2);
+    m_motionEdit->setCurrentIndex(1);
+    m_armorAppliedEdit = new QCheckBox(tr("装甲板确认阈值（CAN ACK）"), robotGroup);
+    m_armorAppliedEdit->setObjectName(QStringLiteral("simArmorApplied"));
+    m_armorAppliedEdit->setChecked(true);
+    robotForm->addRow(tr("手柄动静"), m_motionEdit);
+    robotForm->addRow(QString(), m_armorAppliedEdit);
     controlsLayout->addWidget(robotGroup);
 
     auto *controlRow = new QHBoxLayout;
@@ -513,8 +524,38 @@ void SimulatorWindow::sendStatus()
         return;
     }
     sendDatagram(statusFrame(), tr("状态"));
-    if (protocolVersion() == proto::kVersion2)
+    if (protocolVersion() == proto::kVersion2) {
         sendDatagram(proto::makeDeviceHealth(robotId(), m_componentOnline), tr("健康状态"));
+        sendMotionAndArmor();
+    }
+}
+
+// Mirrors ESP32 f1c17e0 network loop: motion on change or every 500 ms;
+// one NodeID threshold snapshot per loop (four slots ~400 ms).
+void SimulatorWindow::sendMotionAndArmor()
+{
+    const quint8 id = robotId();
+    if (!id) return;
+    const quint8 motion = quint8(m_motionEdit->currentData().toUInt());
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (motion != m_lastMotionSent || now - m_lastMotionSentMs >= 500) {
+        sendDatagram(proto::makeMotion(id, motion, m_motionSequence++), tr("动静"));
+        m_lastMotionSent = motion; m_lastMotionSentMs = now;
+    }
+    // L431 treats UNKNOWN as moving.
+    const quint8 selected = motion == 1 ? 1 : 2;
+    quint8 applied = 0, storage = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (m_armorAppliedEdit->isChecked()) applied |= quint8(1U << i);
+        if (m_armor[i].saved) storage = 1;
+    }
+    const ArmorConfig &c = m_armor[m_armorSlot];
+    const quint32 target = selected == 1 ? c.still : c.moving;
+    sendDatagram(proto::makeArmorThresholdState(id, quint8(m_armorSlot + 1), selected, applied,
+                                                0, storage, c.still, c.moving,
+                                                m_armorAppliedEdit->isChecked() ? target : 0),
+                 tr("阈值快照"));
+    m_armorSlot = quint8((m_armorSlot + 1) % 4);
 }
 
 void SimulatorWindow::sendDatagram(const QByteArray &data, const QString &description)
@@ -815,6 +856,22 @@ void SimulatorWindow::handleDownlink(const QByteArray &data,
     case proto::TypeForcePowerOn:
         m_powerOnEdit->setChecked(true);
         break;
+    case proto::TypeArmorThresholdSet: {
+        // L431 validation: node 1..4, profile 0/1, range, and still <= moving per board.
+        const int n = int(frame.armorNode) - 1;
+        const quint32 v = frame.thresholdValue;
+        if (n < 0 || n > 3 || frame.armorProfile > 1
+            || v < proto::kArmorThresholdMin || v > proto::kArmorThresholdMax
+            || (frame.armorProfile == 0 ? v > m_armor[n].moving : v < m_armor[n].still)) {
+            result = 1;
+            break;
+        }
+        (frame.armorProfile == 0 ? m_armor[n].still : m_armor[n].moving) = v;
+        m_armor[n].saved = true;
+        appendLog(tr("[阈值] 板 %1 %2 = %3（已保存）").arg(n + 1)
+                      .arg(frame.armorProfile == 0 ? tr("静止") : tr("运动")).arg(v));
+        break;
+    }
     default:
         return;
     }

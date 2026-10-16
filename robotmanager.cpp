@@ -42,6 +42,13 @@ bool hasNonZeroByte(const QByteArray &bytes)
 }
 } // namespace
 
+quint8 RobotManager::effectiveMotion(const RobotInfo &r, qint64 nowMs)
+{
+    if (!r.online || r.lastMotionSeenMs == 0 || nowMs - r.lastMotionSeenMs > kMotionStaleMs)
+        return 0;
+    return r.motion;
+}
+
 RobotManager::RobotManager(QObject *parent)
     : QObject(parent)
 {
@@ -281,6 +288,25 @@ void RobotManager::handleDatagram(const QByteArray &data,
         // dedicated permission event or the next STATUS defines that state.
         emit logMessage(QStringLiteral("[战斗] %1 脱离战斗")
                             .arg(robotTag(r.team, f.robotId)));
+        break;
+    case proto::TypeMotion:
+        r.motion = f.motion <= 2 ? f.motion : 0;
+        r.lastMotionSeenMs = r.lastSeenMs;
+        break;
+    case proto::TypeArmorThresholdState:
+        if (f.armorNode >= 1 && f.armorNode <= 4) {
+            RobotInfo::ArmorSlot &s = r.armor[f.armorNode - 1];
+            const quint8 bit = quint8(1U << (f.armorNode - 1));
+            s.seen = true;
+            s.lastSeenMs = r.lastSeenMs;
+            s.l431Motion = f.motion <= 2 ? f.motion : 0;
+            s.applied = (f.appliedMask & bit) != 0;
+            s.failed = (f.failedMask & bit) != 0;
+            s.storageStatus = f.storageStatus;
+            s.still = f.stillThreshold;
+            s.moving = f.movingThreshold;
+            s.appliedValue = f.appliedThreshold;
+        }
         break;
     case proto::TypeDeviceHealth:
         {

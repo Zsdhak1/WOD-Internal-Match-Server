@@ -6,6 +6,9 @@
 #include "competitionflow.h"
 #include "matchtimingpresets.h"
 #include "manualdamageserver.h"
+#include "armorthresholddialog.h"
+
+#include <QPointer>
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -107,6 +110,7 @@ private slots:
     void onForcePowerOn();
     void onForcePowerOff();
     void onSetHp();
+    void onShowArmorThresholds();
     void onRequestStatus();
     void onLayoutElementChanged(int index);
     void onLayoutPositionChanged();
@@ -239,6 +243,7 @@ private:
     QSpinBox       *m_deviceRobotEdit = nullptr;
     QComboBox      *m_deviceTeamEdit = nullptr;
     QSpinBox       *m_deviceHpEdit = nullptr;
+    QPointer<ArmorThresholdDialog> m_armorDialog;
     QComboBox      *m_deviceSelectEdit = nullptr;
     QLineEdit      *m_deviceControllerMacEdit = nullptr;
     QVector<MatchServer::VideoSourceInfo> m_videoSources;
@@ -290,8 +295,6 @@ private:
     QComboBox *m_teamPairEdit = nullptr;
     QPushButton *m_applyTeamPairBtn = nullptr;
     QLabel *m_competitionPhaseLabel = nullptr;
-    QLabel *m_redRevivesLabel = nullptr;
-    QLabel *m_blueRevivesLabel = nullptr;
     QLabel *m_redScoreLabel = nullptr;
     QLabel *m_blueScoreLabel = nullptr;
     RefereeEntryPanel *m_refereeEntryPanel = nullptr;

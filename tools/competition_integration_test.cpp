@@ -30,7 +30,10 @@ static void call(QObject &o,const char *name)
 { check(QMetaObject::invokeMethod(&o,name,Qt::DirectConnection),"slot unavailable"); }
 static void settle(int ms=40)
 { QElapsedTimer t;t.start();do{QApplication::processEvents();QThread::msleep(2);}while(t.elapsed()<ms); }
-static void wait(const std::function<bool()> &f,const char *why)
+// Red side line of the 胜负判定 card (the single place remaining revives are shown).
+static QString redRevives(QObject &m)
+{ call(m,"onRefereeTick"); const QString t=child<QLabel>(m,"refereeStatus")->text();
+  const int a=t.indexOf(QStringLiteral("红方</span>")); return a<0?QString():t.mid(a,t.indexOf(QStringLiteral("<br>"),a)-a); }static void wait(const std::function<bool()> &f,const char *why)
 { QElapsedTimer t;t.start();while(!f()&&t.elapsed()<3500)settle(5);check(f(),why); }
 static BroadcastWindow *broadcast()
 { for(auto *w:QApplication::topLevelWidgets())if(auto *b=qobject_cast<BroadcastWindow *>(w))if(!qobject_cast<ClientWindow *>(w))return b;throw std::runtime_error("missing output"); }
@@ -95,11 +98,11 @@ int main(int argc,char **argv)
             call(red,"onSendDeath");wait([&]{return !child<QCheckBox>(red,"simAlive")->isChecked();},"death missing");
             settle(150);now+=5000;red.advanceProtocolTimeForTest(5000);call(main,"onRefereeTick");
             wait([&]{return child<QCheckBox>(red,"simAlive")->isChecked();},"revival approval not delivered");
-            wait([&]{return !child<QLabel>(main,"redRemainingRevives")->text().contains(QStringLiteral("确认中"));},"revival ACK not accounted");
+            wait([&]{return !redRevives(main).contains(QStringLiteral("确认中"));},"revival ACK not accounted");
             settle(150);
         };
         deathAndRevive();
-        check(child<QLabel>(main,"redRemainingRevives")->text().contains("2 / 3"),"revival quota not displayed");
+        check(redRevives(main).contains("2 / 3"),"revival quota not displayed");
         wait([&]{return child<QLabel>(client,"redReviveCount")->text().contains("2");},"client quota not mirrored");
         capture("server-revival-accounted");captureClient("formal-running");
         now+=qint64(bw->remainingSeconds())*1000;call(main,"onRefereeTick");
@@ -121,9 +124,9 @@ int main(int argc,char **argv)
         now+=59999;call(main,"onRefereeTick");check(!child<QPushButton>(main,"startMatch")->isEnabled(),"prep ended early");
         now+=1;call(main,"onRefereeTick");check(child<QPushButton>(main,"startMatch")->isEnabled(),"prep failed to unlock");
         check(!bw->isMatchRunning(),"automatic unsafe next round");
-        startRound();check(bw->blueScore()==1&&child<QLabel>(main,"redRemainingRevives")->text().contains("3 / 3"),"new round lost wins or kept old quota");
+        startRound();check(bw->blueScore()==1&&redRevives(main).contains("3 / 3"),"new round lost wins or kept old quota");
         for(int i=0;i<3;++i)deathAndRevive();
-        check(child<QLabel>(main,"redRemainingRevives")->text().contains("0 / 3"),"three approvals not exhausted");
+        check(redRevives(main).contains("0 / 3"),"three approvals not exhausted");
         call(red,"onSendDeath");settle(150);now+=301;call(main,"onRefereeTick");
         wait([&]{return bw->roundEnded();},"exhausted death not settled");
         check(entry->result().value("reason").toString()=="revive_exhausted"&&bw->blueScore()==2,"BO3 2:0 wrong");

@@ -79,8 +79,9 @@ constexpr int kColState = 5;
 constexpr int kColShoot = 6;
 constexpr int kColPowerOn = 7; // V2 only
 constexpr int kColLink  = 8;   // V2 only
-constexpr int kColVer   = 9;
-constexpr int kColAddr  = 10;
+constexpr int kColMotion = 9;  // V2 0x0E 手柄动静
+constexpr int kColVer   = 10;
+constexpr int kColAddr  = 11;
 
 QStringList parseDelimitedLine(const QString &line, QChar delimiter)
 {
@@ -234,6 +235,7 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
     connect(m_commander, &RobotCommander::commandAcked, this,
             [this](quint32 txid, quint8 type, quint8 result, quint8 robotId) {
         if (finishManualDamage(txid, type, robotId, result)) return;
+        if (m_armorDialog && m_armorDialog->handleAck(txid, type, result)) return;
         if (competitionMode() && type == proto::TypeReviveApprove) {
             const QString device = m_activeDeviceMacs.value(robotId);
             m_competition.acknowledgeApproval(device, robotId, txid, result);
@@ -272,6 +274,7 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
     connect(m_commander, &RobotCommander::commandTimeout, this,
             [this](quint32 txid, quint8 type, quint8 robotId) {
         if (finishManualDamage(txid, type, robotId, -1)) return;
+        if (m_armorDialog && m_armorDialog->handleTimeout(txid, type)) return;
         if (competitionMode() && type == proto::TypeReviveApprove) {
             m_competition.approvalTimeout(robotId, txid);
             persistCompetitionLedger();
@@ -592,13 +595,7 @@ void MainWindow::buildUi()
     m_competitionPhaseLabel->setWordWrap(true);
     m_competitionPhaseLabel->setStyleSheet(QStringLiteral("color:#ffce48; font-weight:bold; padding:6px;"));
     matchLayout->addRow(m_competitionPhaseLabel);
-    auto *revives = new QHBoxLayout;
-    m_redRevivesLabel = new QLabel(tr("红方剩余复活：3 / 3"), matchGroup);
-    m_redRevivesLabel->setObjectName(QStringLiteral("redRemainingRevives"));
-    m_blueRevivesLabel = new QLabel(tr("蓝方剩余复活：3 / 3"), matchGroup);
-    m_blueRevivesLabel->setObjectName(QStringLiteral("blueRemainingRevives"));
-    revives->addWidget(m_redRevivesLabel); revives->addWidget(m_blueRevivesLabel);
-    matchLayout->addRow(revives);
+    // Remaining revives are shown once, in the 胜负判定 status card.
     auto *animationActions = new QHBoxLayout;
     m_settlementPreviewTypeEdit = new QComboBox(matchGroup);
     m_settlementPreviewTypeEdit->addItem(tr("红方胜利"), QStringLiteral("redwin"));
@@ -1114,7 +1111,12 @@ void MainWindow::buildUi()
     deviceGrid->addWidget(deviceHpBtn,6,1);
     deviceGrid->addWidget(devicePowerOnBtn,7,0);
     deviceGrid->addWidget(devicePowerOffBtn,7,1);
-    deviceGrid->addWidget(deviceStatusBtn,8,0,1,2);
+    deviceGrid->addWidget(deviceStatusBtn,8,0);
+    auto *armorBtn = new QPushButton(tr("装甲板阈值…"), deviceGroup);
+    armorBtn->setObjectName(QStringLiteral("showArmorThresholds"));
+    armorBtn->setToolTip(tr("调整当前机器人 4 块装甲板的静止 / 运动受击阈值"));
+    connect(armorBtn, &QPushButton::clicked, this, &MainWindow::onShowArmorThresholds);
+    deviceGrid->addWidget(armorBtn,8,1);
     deviceGrid->setColumnStretch(0,1);
     deviceGrid->setColumnStretch(1,1);
     deviceLayout->addLayout(deviceGrid);
@@ -1151,12 +1153,12 @@ void MainWindow::buildUi()
     auto *tableGroup = new QGroupBox(tr("机器人状态"), central);
     auto *tableLayout = new QVBoxLayout(tableGroup);
     tableLayout->setContentsMargins(8, 10, 8, 8);
-    m_table = new QTableWidget(0, 11, tableGroup);
+    m_table = new QTableWidget(0, 12, tableGroup);
     m_table->setObjectName(QStringLiteral("robotTable"));
     m_table->setHorizontalHeaderLabels({
         tr("机器人ID"), tr("队伍"), tr("血量 HP"), tr("热量"),
         tr("功率 W"), tr("状态"), tr("射击"), tr("供电"), tr("链路"),
-        tr("协议"), tr("来源地址")});
+        tr("运动"), tr("协议"), tr("来源地址")});
     m_table->verticalHeader()->setVisible(false);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -1620,17 +1622,12 @@ void MainWindow::refreshCompetitionUi()
     if (!m_competitionPhaseLabel || !m_broadcast) return;
     const bool formal = competitionMode();
     m_competitionPhaseLabel->setVisible(formal);
-    m_redRevivesLabel->setVisible(formal); m_blueRevivesLabel->setVisible(formal);
     if (!formal) return;
     const int seconds = m_competition.remainingSeconds(refereeNow());
     m_competitionPhaseLabel->setText((m_noDeviceDebug ? tr("[无车调试] ") : QString())
         + tr("BO3 · 第 %1 局 · %2 · %3:%4")
         .arg(m_competition.roundIndex()).arg(m_competition.phaseText())
         .arg(seconds/60,2,10,QLatin1Char('0')).arg(seconds%60,2,10,QLatin1Char('0')));
-    m_redRevivesLabel->setText(tr("红方剩余复活：%1 / 3%2").arg(m_competition.remainingRevives(1))
-        .arg(m_competition.revivePending(1) ? tr(" · 确认中") : QString()));
-    m_blueRevivesLabel->setText(tr("蓝方剩余复活：%1 / 3%2").arg(m_competition.remainingRevives(2))
-        .arg(m_competition.revivePending(2) ? tr(" · 确认中") : QString()));
     const bool locked = m_competition.locked();
     const auto phase = m_competition.phase();
     m_matchBtn->setEnabled(phase == CompetitionFlow::Phase::Ready || phase == CompetitionFlow::Phase::Cancelled || phase == CompetitionFlow::Phase::Countdown);
@@ -3302,6 +3299,24 @@ void MainWindow::onSetHp()
     trackCommand(txid, tr("设置 HP=%1").arg(hp));
 }
 
+void MainWindow::onShowArmorThresholds()
+{
+    if (!m_commander || !m_robots || !m_deviceRobotEdit) return;
+    const quint8 robotId = static_cast<quint8>(m_deviceRobotEdit->value());
+    if (!robotId) { reportAction(tr("请先选择已分配 ID 的机器人"), QStringLiteral("error")); return; }
+    // One dialog at a time: it owns the in-flight 0x8A sequence for its robot.
+    if (m_armorDialog) {
+        if (m_armorDialog->robotId() == robotId || m_armorDialog->busy()) {
+            m_armorDialog->raise(); m_armorDialog->activateWindow(); return;
+        }
+        m_armorDialog->close();
+    }
+    m_armorDialog = new ArmorThresholdDialog(m_robots, m_commander, robotId, this);
+    m_armorDialog->setAttribute(Qt::WA_DeleteOnClose);
+    // Thresholds can change any time, including mid-round (operator's choice).
+    m_armorDialog->show();
+}
+
 void MainWindow::onRequestStatus()
 {
     if (!m_commander || !m_deviceRobotEdit)
@@ -3427,6 +3442,14 @@ void MainWindow::refreshTable()
         m_table->setItem(row, kColShoot, shootItem);
         m_table->setItem(row, kColPowerOn, powerOnItem);
         m_table->setItem(row, kColLink, linkItem);
+        const quint8 motion = r.protocolVersion == proto::kVersion2
+            ? RobotManager::effectiveMotion(r, QDateTime::currentMSecsSinceEpoch()) : 0;
+        auto *motionItem = new QTableWidgetItem(
+            !r.online || r.protocolVersion != proto::kVersion2 ? tr("-")
+            : motion == 1 ? tr("静止") : motion == 2 ? tr("运动") : tr("未知"));
+        motionItem->setForeground(motion == 2 ? QColor(0, 120, 215) : motion == 1 ? green : gray);
+        motionItem->setTextAlignment(Qt::AlignCenter);
+        m_table->setItem(row, kColMotion, motionItem);
         m_table->setItem(row, kColVer, verItem);
         m_table->setItem(row, kColAddr, addrItem);
     }

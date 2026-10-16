@@ -35,6 +35,8 @@ public:
     quint32 sendForcePowerOff(quint8 targetId);
     quint32 sendForcePowerOn(quint8 targetId);
     quint32 sendSetHp(quint8 targetId, quint16 hp);
+    // 0x8A：node=1..4，profile 0=静止 1=运动；ACK result=0 仅表示 L431 已保存。
+    quint32 sendArmorThreshold(quint8 targetId, quint8 node, quint8 profile, quint32 value);
     // Returns requestTx (never allocates a new tx), or 0 on send failure.
     quint32 sendReviveApproval(quint8 targetId, quint8 sequence, quint32 requestTx);
     quint32 sendAssignment(quint32 ipv4, quint8 robotId,
@@ -69,6 +71,7 @@ private:
         quint16      port = 0;
         int          attempts = 0;
         qint64       deadlineMs = 0;
+        int          retryIntervalMs = 100; // 0x8A 需等 L431 Flash：1000 ms
     };
 
     quint32 sendCommand(quint8 type, quint8 targetId, const QByteArray &datagram,

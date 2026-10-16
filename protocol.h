@@ -33,6 +33,8 @@ enum FrameType : quint8 {
     TypeCombatEnd     = 0x0B,   // V2 新增：脱离战斗
     TypeDeviceHealth  = 0x0C,   // V2 设备健康位图
     TypeReviveRequest = 0x0D,   // V2 正式复活申请：10B，seq + request_tx
+    TypeMotion        = 0x0E,   // V2 手柄动静快照：7B，motion + sequence，无 ACK
+    TypeArmorThresholdState = 0x0F, // V2 L431 单槽阈值快照：22B，轮换 NodeID
     // 下行（server -> ESP32）
     TypeGameStart     = 0x81,   // 比赛开始：9B + ACK
     TypeGameEnd       = 0x82,   // 比赛结束：9B + ACK
@@ -43,6 +45,7 @@ enum FrameType : quint8 {
     TypeForcePowerOff = 0x87,   // 强制断电：9B + ACK
     TypeForcePowerOn  = 0x88,   // 请求通电：9B + ACK
     TypeReviveApprove = 0x89,   // V2 正式复活批准：10B，原样回显 seq + request_tx
+    TypeArmorThresholdSet = 0x8A, // V2 单板单档阈值：15B + ACK（ACK=L431 已保存）
     TypeAck           = 0xF0,   // ACK 回执：10B（不是复活批准）
 };
 
@@ -88,6 +91,9 @@ inline int expectedSizeV2(int type)
     case TypeReviveRequest:
     case TypeReviveApprove:
     case TypeAck:           return 10;
+    case TypeMotion:        return 7;
+    case TypeArmorThresholdSet:   return 15;
+    case TypeArmorThresholdState: return 22;
     default:                return -1;
     }
 }
@@ -122,6 +128,18 @@ struct Frame {
     quint32 eventQueueDrops = 0;            // V2 DEVICE_ANNOUNCE diagnostics
     quint32 udpSendFailures = 0;            // V2 DEVICE_ANNOUNCE diagnostics
     bool    fromStatus     = false;
+    // V2 MOTION / ARMOR_THRESHOLD_*
+    quint8  motion         = 0;             // 0=unknown 1=still 2=moving
+    quint8  motionSequence = 0;
+    quint8  armorNode      = 0;             // NodeID 1..4
+    quint8  armorProfile   = 0;             // 0x8A: 0=still 1=moving
+    quint32 thresholdValue = 0;             // 0x8A
+    quint8  appliedMask    = 0;             // 0x0F bit0..3 = NodeID 1..4
+    quint8  failedMask     = 0;
+    quint8  storageStatus  = 0;             // 0 default, 1 saved, 2 last save failed
+    quint32 stillThreshold = 0;
+    quint32 movingThreshold = 0;
+    quint32 appliedThreshold = 0;           // 0 = no confirmed value
     QByteArray deviceMac;                   // V2 DEVICE_ANNOUNCE / ASSIGNMENT, 6 bytes
     QByteArray controllerMac;               // V2 DEVICE_ANNOUNCE / ASSIGNMENT, 6 bytes
 };
@@ -364,6 +382,62 @@ inline QByteArray makeSetHp(quint8 targetId, quint16 hp, quint32 txid)
     return data;
 }
 
+// ---------- V2 装甲板动静双阈值（ESP32 f1c17e0） ----------
+// 阈值合法范围；每块板须满足 still <= moving。
+constexpr quint32 kArmorThresholdMin = 1000;
+constexpr quint32 kArmorThresholdMax = 67108864;
+constexpr quint32 kArmorDefaultStill = 700000;
+constexpr quint32 kArmorDefaultMoving = 1000000;
+constexpr int kArmorNodeCount = 4;
+
+inline QByteArray makeArmorThresholdSet(quint8 targetId, quint8 node, quint8 profile,
+                                        quint32 value, quint32 txid)
+{
+    QByteArray data(15, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeArmorThresholdSet);
+    data[4] = static_cast<char>(targetId);
+    data[5] = static_cast<char>(node);
+    data[6] = static_cast<char>(profile);
+    writeU32(data, 7, value);
+    writeU32(data, 11, txid);
+    return data;
+}
+
+inline QByteArray makeMotion(quint8 robotId, quint8 motion, quint8 sequence)
+{
+    QByteArray data(7, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeMotion);
+    data[4] = static_cast<char>(robotId);
+    data[5] = static_cast<char>(motion);
+    data[6] = static_cast<char>(sequence);
+    return data;
+}
+
+inline QByteArray makeArmorThresholdState(quint8 robotId, quint8 node, quint8 motion,
+                                          quint8 appliedMask, quint8 failedMask,
+                                          quint8 storageStatus, quint32 still,
+                                          quint32 moving, quint32 applied)
+{
+    QByteArray data(22, Qt::Uninitialized);
+    writeU16(data, 0, kMagic);
+    data[2] = static_cast<char>(kVersion2);
+    data[3] = static_cast<char>(TypeArmorThresholdState);
+    data[4] = static_cast<char>(robotId);
+    data[5] = static_cast<char>(node);
+    data[6] = static_cast<char>(motion);
+    data[7] = static_cast<char>(appliedMask);
+    data[8] = static_cast<char>(failedMask);
+    data[9] = static_cast<char>(storageStatus);
+    writeU32(data, 10, still);
+    writeU32(data, 14, moving);
+    writeU32(data, 18, applied);
+    return data;
+}
+
 inline QByteArray makeAck(quint8 ackedType, quint32 txid, quint8 result)
 {
     QByteArray data(10, Qt::Uninitialized);
@@ -464,6 +538,26 @@ inline bool parseDatagram(const QByteArray &dg, Frame &out)
         out.hp            = readU16(p + 5);
         out.transactionId = readU32(p + 7);
         break;
+    case TypeMotion:
+        out.motion         = static_cast<quint8>(p[5]);
+        out.motionSequence = static_cast<quint8>(p[6]);
+        break;
+    case TypeArmorThresholdSet:
+        out.armorNode      = static_cast<quint8>(p[5]);
+        out.armorProfile   = static_cast<quint8>(p[6]);
+        out.thresholdValue = readU32(p + 7);
+        out.transactionId  = readU32(p + 11);
+        break;
+    case TypeArmorThresholdState:
+        out.armorNode        = static_cast<quint8>(p[5]);
+        out.motion           = static_cast<quint8>(p[6]);
+        out.appliedMask      = static_cast<quint8>(p[7]);
+        out.failedMask       = static_cast<quint8>(p[8]);
+        out.storageStatus    = static_cast<quint8>(p[9]);
+        out.stillThreshold   = readU32(p + 10);
+        out.movingThreshold  = readU32(p + 14);
+        out.appliedThreshold = readU32(p + 18);
+        break;
     default:
         break;
     }
@@ -480,7 +574,8 @@ inline bool isDownlinkCommand(quint8 type)
            || type == TypeAssignment || type == TypeStatusRequest
            || type == TypeSetHp
            || type == TypeYellowCard || type == TypeForcePowerOff
-           || type == TypeForcePowerOn || type == TypeReviveApprove;
+           || type == TypeForcePowerOn || type == TypeReviveApprove
+           || type == TypeArmorThresholdSet;
 }
 
 } // namespace proto

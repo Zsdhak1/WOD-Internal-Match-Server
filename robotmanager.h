@@ -43,7 +43,27 @@ public:
         quint16   sourcePort = 0;      // UDP source port from the last uplink
         quint16   downlinkPort = 0;    // ESP32 command port, normally 5006
         quint32   lastTxid = 0;        // 最近一次可靠事件的 txid
+        // V2 0x0E: ESP32 判断的手柄动静（0 未知/1 静止/2 运动）；超过 2 s 视为未知
+        quint8    motion = 0;
+        qint64    lastMotionSeenMs = 0;
+        // V2 0x0F: L431 每个 NodeID 槽的阈值快照（index = node-1）
+        struct ArmorSlot {
+            bool    seen = false;
+            qint64  lastSeenMs = 0;
+            quint8  l431Motion = 0;     // L431 实际选择的动静状态
+            bool    applied = false;    // applied_mask 对应位
+            bool    failed = false;     // failed_mask 对应位
+            quint8  storageStatus = 0;  // 0 默认 / 1 已保存 / 2 最近保存失败
+            quint32 still = 0, moving = 0, appliedValue = 0;
+        };
+        ArmorSlot armor[4];
     };
+    static constexpr qint64 kMotionStaleMs = 2000;   // 协议：2 s 无新快照显示 UNKNOWN
+    static constexpr qint64 kArmorStaleMs = 2000;
+    // 当前时刻的有效动静（过期返回 0）
+    static quint8 effectiveMotion(const RobotInfo &r, qint64 nowMs);
+    static bool armorSlotFresh(const RobotInfo::ArmorSlot &s, qint64 nowMs)
+    { return s.seen && nowMs - s.lastSeenMs <= kArmorStaleMs; }
 
     struct DeviceInfo {
         QString deviceMac;

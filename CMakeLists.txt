@@ -71,6 +71,8 @@ set(PROJECT_SOURCES
         manualdamageserver.h
         manualdamagepage.cpp
         mainwindow_manualdamage.cpp
+        armorthresholddialog.cpp
+        armorthresholddialog.h
         third_party/qrcodegen/qrcodegen.cpp
         third_party/qrcodegen/qrcodegen.hpp
         refereeentrypanel.cpp
@@ -254,7 +256,8 @@ add_executable(SimulatorIntegrationTest
     matchreferee.cpp matchreferee.h
     matchserver.cpp matchserver.h
     matchtimingpresets.cpp matchtimingpresets.h matchtimingdialog.cpp matchtimingdialog.h
-    manualdamageserver.cpp manualdamageserver.h manualdamagepage.cpp mainwindow_manualdamage.cpp third_party/qrcodegen/qrcodegen.cpp third_party/qrcodegen/qrcodegen.hpp)
+    manualdamageserver.cpp manualdamageserver.h manualdamagepage.cpp mainwindow_manualdamage.cpp third_party/qrcodegen/qrcodegen.cpp third_party/qrcodegen/qrcodegen.hpp
+    armorthresholddialog.cpp armorthresholddialog.h)
 target_include_directories(SimulatorIntegrationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(SimulatorIntegrationTest PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -313,6 +316,10 @@ add_executable(ManualDamageTest tools/manual_damage_test.cpp ${_competition_inte
 target_include_directories(ManualDamageTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ManualDamageTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(ArmorThresholdTest tools/armor_threshold_test.cpp ${_competition_integration_sources})
+target_include_directories(ArmorThresholdTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ArmorThresholdTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 add_executable(MatchTimingPresetTest tools/match_timing_preset_test.cpp ${_competition_integration_sources})
 target_include_directories(MatchTimingPresetTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(MatchTimingPresetTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -327,8 +334,9 @@ add_test(NAME competition_integration COMMAND CompetitionIntegrationTest)
 add_test(NAME no_device_debug COMMAND NoDeviceDebugTest)
 add_test(NAME match_timing_presets COMMAND MatchTimingPresetTest)
 add_test(NAME manual_damage COMMAND ManualDamageTest)
+add_test(NAME armor_threshold COMMAND ArmorThresholdTest)
 set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug
-    match_timing_presets manual_damage PROPERTIES
+    match_timing_presets manual_damage armor_threshold PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES

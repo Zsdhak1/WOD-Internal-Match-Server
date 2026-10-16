@@ -11,6 +11,7 @@ namespace {
 constexpr int    kRetryIntervalMs = 100;   // ESP32 README §5 建议 100ms
 constexpr int    kMaxAttempts     = 3;     // 初始 + 2 次重传
 constexpr qint64 kCommandTimeoutMs = 400;  // 100ms * 3 + 余量
+constexpr int    kSlowRetryIntervalMs = 1000; // 0x8A：协议 CLI 每 1 s 重试，共 3 次
 
 QString typeName(quint8 type)
 {
@@ -23,6 +24,7 @@ QString typeName(quint8 type)
     case proto::TypeYellowCard:    return QStringLiteral("黄牌处罚");
     case proto::TypeForcePowerOff: return QStringLiteral("强制断电");
     case proto::TypeReviveApprove: return QStringLiteral("复活批准");
+    case proto::TypeArmorThresholdSet: return QStringLiteral("装甲板阈值");
     case proto::TypeForcePowerOn:  return QStringLiteral("请求通电");
     default:                       return QStringLiteral("0x%1").arg(type, 2, 16);
     }
@@ -126,6 +128,7 @@ quint32 RobotCommander::sendCommandTo(quint8 type, quint8 targetId, quint32 ipv4
     quint32 txid = 0;
     if (needsAck) {
         const int txidOffset = type == proto::TypeSetHp ? 7
+                               : type == proto::TypeArmorThresholdSet ? 11
                                : type == proto::TypeAssignment ? 17
                                : type == proto::TypeReviveApprove ? 6 : 5;
         if (datagram.size() < txidOffset + 4)
@@ -155,7 +158,12 @@ quint32 RobotCommander::sendCommandTo(quint8 type, quint8 targetId, quint32 ipv4
         p.ipv4 = ipv4;
         p.port = port;
         p.attempts = 1;
-        p.deadlineMs = QDateTime::currentMSecsSinceEpoch() + kCommandTimeoutMs;
+        // ESP32 holds 0x8A until L431 confirms its Flash save (<=200 ms) and
+        // queues every copy; the firmware CLI retries once per second.
+        const bool slow = type == proto::TypeArmorThresholdSet;
+        p.retryIntervalMs = slow ? kSlowRetryIntervalMs : kRetryIntervalMs;
+        p.deadlineMs = QDateTime::currentMSecsSinceEpoch()
+                       + (slow ? kSlowRetryIntervalMs : kCommandTimeoutMs);
         m_pending.insert(pendingKey(type, targetId, txid), p);
     }
 
@@ -213,6 +221,17 @@ quint32 RobotCommander::sendSetHp(quint8 targetId, quint16 hp)
     const quint32 txid = allocateTxid();
     return sendCommand(proto::TypeSetHp, targetId,
                        proto::makeSetHp(targetId, hp, txid), true);
+}
+
+quint32 RobotCommander::sendArmorThreshold(quint8 targetId, quint8 node, quint8 profile,
+                                           quint32 value)
+{
+    if (!targetId || node < 1 || node > proto::kArmorNodeCount || profile > 1
+        || value < proto::kArmorThresholdMin || value > proto::kArmorThresholdMax)
+        return 0;
+    const quint32 txid = allocateTxid();
+    return sendCommand(proto::TypeArmorThresholdSet, targetId,
+                       proto::makeArmorThresholdSet(targetId, node, profile, value, txid), true);
 }
 
 quint32 RobotCommander::sendReviveApproval(quint8 targetId, quint8 sequence,
@@ -309,7 +328,7 @@ void RobotCommander::onRetryTick()
             continue;
         }
         ++it->attempts;
-        it->deadlineMs = now + kRetryIntervalMs;
+        it->deadlineMs = now + it->retryIntervalMs;
         const qint64 written = m_uplink->writeDatagram(
             p.datagram, QHostAddress(p.ipv4), p.port);
         if (written != p.datagram.size()) {

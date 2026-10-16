@@ -138,6 +138,16 @@ private:
     QCheckBox *m_aliveEdit = nullptr;
     QCheckBox *m_shootEdit = nullptr;
     QCheckBox *m_powerOnEdit = nullptr;
+    QComboBox *m_motionEdit = nullptr;      // 0x0E 手柄动静：未知/静止/运动
+    QCheckBox *m_armorAppliedEdit = nullptr; // 模拟装甲板 CAN ACK：是否回 applied
+    // 模拟 L431 阈值配置（RAM；真实固件存 L431 Flash）
+    struct ArmorConfig { quint32 still = 700000, moving = 1000000; bool saved = false; };
+    ArmorConfig m_armor[4];
+    quint8 m_motionSequence = 0;
+    quint8 m_armorSlot = 0;
+    quint8 m_lastMotionSent = 0xff;
+    qint64 m_lastMotionSentMs = 0;
+    void sendMotionAndArmor();
     QPushButton *m_runningButton = nullptr;
     QGroupBox *m_eventsGroup = nullptr;
     QCheckBox *m_autoDemo = nullptr;
