@@ -19,6 +19,16 @@ void CompetitionFlow::resetSeries()
     }
 }
 
+bool CompetitionFlow::setTimings(int roundMs, int intermissionMs)
+{
+    if (timingLocked() || roundMs < kMinRoundMs || roundMs > kMaxRoundMs
+        || intermissionMs < 0 || intermissionMs > kMaxIntermissionMs)
+        return false;
+    m_roundMs = roundMs;
+    m_intermissionMs = intermissionMs;
+    return true;
+}
+
 bool CompetitionFlow::beginCountdown(qint64 now)
 {
     if (m_phase != Phase::Ready && m_phase != Phase::Cancelled) return false;
@@ -41,7 +51,7 @@ bool CompetitionFlow::confirmStart(qint64 now)
     if (m_phase != Phase::Starting) return false;
     for (int i = 0; i < 2; ++i) { m_remaining[i] = kReviveLimit; m_deadSince[i] = -1; m_deathCycle[i] = 0; }
     m_phase = Phase::Running;
-    m_deadline = now + kRoundMs;
+    m_deadline = now + m_roundMs;
     return true;
 }
 void CompetitionFlow::cancelStart()
@@ -70,7 +80,7 @@ void CompetitionFlow::finishRound(quint8 winner, qint64 now)
     ++m_wins[i];
     m_advanceRound = true;
     if (m_wins[i] >= 2) { m_phase = Phase::MatchFinished; m_deadline = -1; }
-    else { m_phase = Phase::Intermission; m_deadline = now + kIntermissionMs; }
+    else { m_phase = Phase::Intermission; m_deadline = now + m_intermissionMs; }
 }
 
 void CompetitionFlow::awaitDecision(qint64 now)
@@ -155,13 +165,16 @@ bool CompetitionFlow::locked() const
 }
 int CompetitionFlow::remainingSeconds(qint64 now) const
 {
-    if (m_phase == Phase::Ready || m_phase == Phase::Cancelled) return kRoundMs / 1000;
+    if (m_phase == Phase::Ready || m_phase == Phase::Cancelled) return m_roundMs / 1000;
     if (m_phase == Phase::AwaitingDecision) return m_frozenRemaining;
     if (m_deadline < 0) return 0;
     return int(qMax<qint64>(0, m_deadline - now + 999) / 1000);
 }
 int CompetitionFlow::roundRemainingSeconds(qint64 now) const
-{ return m_phase == Phase::Running ? remainingSeconds(now) : m_phase == Phase::AwaitingDecision ? m_frozenRemaining : 180; }
+{
+    return m_phase == Phase::Running ? remainingSeconds(now)
+         : m_phase == Phase::AwaitingDecision ? m_frozenRemaining : m_roundMs / 1000;
+}
 int CompetitionFlow::wins(quint8 team) const
 { const int i = index(team); return i < 0 ? 0 : m_wins[i]; }
 QString CompetitionFlow::phaseKey() const

@@ -751,6 +751,21 @@ QPoint defaultLayoutOffset(const QString &elementId)
     return QPoint();
 }
 
+// Active formal round length from the server snapshot (timing preset).
+int formalRoundSeconds(const QJsonObject &state)
+{
+    const int seconds = state.value(QStringLiteral("roundDurationSeconds")).toInt(0);
+    return seconds > 0 ? qMin(seconds, 99 * 60 + 59) : 180;
+}
+
+// "3 分钟" / "90 秒" / "2 分 30 秒".
+QString durationText(int seconds)
+{
+    if (seconds % 60 == 0) return QCoreApplication::translate("BroadcastWindow", "%1 分钟").arg(seconds / 60);
+    if (seconds < 60) return QCoreApplication::translate("BroadcastWindow", "%1 秒").arg(seconds);
+    return QCoreApplication::translate("BroadcastWindow", "%1 分 %2 秒").arg(seconds / 60).arg(seconds % 60);
+}
+
 #ifdef Q_OS_WIN
 void coverTaskbarOnScreen(QWidget *window, const QRect &geometry)
 {
@@ -2527,9 +2542,9 @@ void BroadcastWindow::setCompetitionState(const QJsonObject &state)
                                         .value(QStringLiteral("durationMs"));
         const double ms = duration.isDouble() ? duration.toDouble() : -1.0;
         if (ms >= 0.0 && std::isfinite(ms)) {
-            // Formal rounds are always 180 s (CompetitionFlow::kRoundMs); do not
-            // depend on m_clockDuration, which still holds the legacy 60 s default.
-            constexpr int kFormalRoundSeconds = 180;
+            // The round length comes from the active timing preset; older
+            // servers that do not send it ran fixed 180 s rounds.
+            const int kFormalRoundSeconds = formalRoundSeconds(state);
             const int elapsed = int(qMin(ms, 24.0 * 3600 * 1000) / 1000.0);
             m_remainingSeconds = qBound(0, kFormalRoundSeconds - elapsed, kFormalRoundSeconds);
         } else {
@@ -2593,7 +2608,7 @@ void BroadcastWindow::updateCompetitionPresentation()
     else if (m_competitionPhase == QStringLiteral("starting"))
         phaseText = tr("设备确认中 · 等待双方开赛确认");
     else if (m_competitionPhase == QStringLiteral("running"))
-        phaseText = tr("正式局进行中 · 180 秒");
+        phaseText = tr("正式局进行中 · %1").arg(durationText(formalRoundSeconds(m_competitionState)));
     else if (m_competitionPhase == QStringLiteral("awaiting_decision"))
         phaseText = tr("等待裁判判定");
     else if (m_competitionPhase == QStringLiteral("intermission"))

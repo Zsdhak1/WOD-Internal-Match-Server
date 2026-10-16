@@ -4,6 +4,8 @@
 #include "matchreferee.h"
 #include "matchserver.h"
 #include "competitionflow.h"
+#include "matchtimingpresets.h"
+#include "manualdamageserver.h"
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -70,6 +72,11 @@ private slots:
     void onToggleSummary();
     void onRefereeRulesChanged();
     void onNoDeviceDebugToggled(bool enabled);
+    void onTimingPresetChanged(int index);
+    void onEditTimingPresets();
+    void onToggleManualDamageServer();
+    void onShowManualDamageQr();
+    void refreshManualDamageUi();
     void onToggleClientServer();
     void refreshFieldCameraDevices();
     void onToggleFieldCamera();
@@ -250,6 +257,35 @@ private:
     // no GAME_START/ACK wait). Never persisted; off on every launch.
     bool m_noDeviceDebug = false;
     QCheckBox *m_noDeviceDebugEdit = nullptr;
+    // Formal timing presets (round + intermission length), persisted.
+    QVector<MatchTimingPreset> m_timingPresets;
+    QString m_timingPresetName;
+    QComboBox *m_timingPresetEdit = nullptr;
+    QPushButton *m_timingPresetEditBtn = nullptr;
+    void loadTimingPresets();
+    void refreshTimingPresetCombo();
+    bool applyTimingPreset(const QString &name, bool persist);
+    // Manual HP deduction from phones on the LAN (SET_HP current-N, ACK-confirmed).
+    struct ManualDamage {
+        quint64 ticket = 0;
+        quint8 team = 0;
+        quint8 robotId = 0;
+        quint32 txid = 0;
+        int fromHp = 0;
+        int toHp = 0;
+        QString peer;
+    };
+    ManualDamageServer *m_damageServer = nullptr;
+    QHash<quint8, ManualDamage> m_manualDamage; // team -> in-flight deduction (max one)
+    QSpinBox *m_damagePortEdit = nullptr;
+    QSpinBox *m_damageAmountEdit = nullptr;
+    QPushButton *m_damageServerBtn = nullptr;
+    QPushButton *m_damageQrBtn = nullptr;
+    QLabel *m_damageStateLabel = nullptr;
+    void onManualDamageRequested(quint64 ticket, quint8 team, const QString &peer);
+    bool finishManualDamage(quint32 txid, quint8 type, quint8 robotId, int result); // -1 timeout
+    QJsonObject manualDamageState(quint8 team) const;
+    QString manualDamageBlockReason(quint8 team, RobotManager::RobotInfo *robot) const;
     QComboBox *m_ruleProfileEdit = nullptr;
     QComboBox *m_teamPairEdit = nullptr;
     QPushButton *m_applyTeamPairBtn = nullptr;

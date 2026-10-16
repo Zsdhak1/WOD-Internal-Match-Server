@@ -3,6 +3,7 @@
 #include "fieldcamera.h"
 #include "checkinpanel.h"
 #include "refereeentrypanel.h"
+#include "matchtimingdialog.h"
 #include "matchprotocol.h"
 #include "matchserver.h"
 #include "protocol.h"
@@ -232,6 +233,7 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
             &MainWindow::onLogMessage);
     connect(m_commander, &RobotCommander::commandAcked, this,
             [this](quint32 txid, quint8 type, quint8 result, quint8 robotId) {
+        if (finishManualDamage(txid, type, robotId, result)) return;
         if (competitionMode() && type == proto::TypeReviveApprove) {
             const QString device = m_activeDeviceMacs.value(robotId);
             m_competition.acknowledgeApproval(device, robotId, txid, result);
@@ -269,6 +271,7 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
     });
     connect(m_commander, &RobotCommander::commandTimeout, this,
             [this](quint32 txid, quint8 type, quint8 robotId) {
+        if (finishManualDamage(txid, type, robotId, -1)) return;
         if (competitionMode() && type == proto::TypeReviveApprove) {
             m_competition.approvalTimeout(robotId, txid);
             persistCompetitionLedger();
@@ -287,6 +290,10 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
     });
 
     m_robots = new RobotManager(this);
+    m_damageServer = new ManualDamageServer(this);
+    m_damageServer->setStateProvider([this](quint8 team) { return manualDamageState(team); });
+    connect(m_damageServer, &ManualDamageServer::damageRequested, this, &MainWindow::onManualDamageRequested);
+    connect(m_damageServer, &ManualDamageServer::logMessage, this, &MainWindow::onLogMessage);
     connect(m_robots, &RobotManager::endpointForgotten, m_commander, &RobotCommander::forgetEndpoint);
     connect(m_robots, &RobotManager::robotsChanged, this, &MainWindow::refreshTable);
     connect(m_robots, &RobotManager::logMessage, this, &MainWindow::onLogMessage);
@@ -395,6 +402,7 @@ MainWindow::MainWindow(QWidget *parent, FieldCameraBackend *cameraBackend, std::
     m_fieldCamera->selectDevice(cameraSettings.value(QStringLiteral("deviceId")).toByteArray());
     refreshFieldCameraDevices();
     onFieldCameraStateChanged();
+    loadTimingPresets();
     loadRefereeRules();
     QSettings ledger(QSettings::defaultFormat(), QSettings::UserScope,
                      QStringLiteral("Scompetition"), QStringLiteral("RevivalLedger"));
@@ -462,6 +470,10 @@ MainWindow::~MainWindow()
         m_autoSwitchTimer->stop();
     if (m_matchServer)
         m_matchServer->stop();
+    if (m_damageServer) {
+        m_damageServer->disconnect(this);
+        m_damageServer->stop();
+    }
     if (m_socket)
         m_socket->close();
 
@@ -552,6 +564,22 @@ void MainWindow::buildUi()
     matchActions->addWidget(m_terminateMatchBtn, 1, 0);
     matchActions->addWidget(m_resetMatchBtn, 1, 1);
     matchLayout->addRow(tr("比赛操作"), matchActions);
+    // Formal timing preset (round + intermission). Editing opens a secondary dialog.
+    auto *timingRow = new QHBoxLayout;
+    timingRow->setSpacing(6);
+    m_timingPresetEdit = new QComboBox(matchGroup);
+    m_timingPresetEdit->setObjectName(QStringLiteral("timingPreset"));
+    m_timingPresetEdit->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_timingPresetEdit->setMinimumContentsLength(14);
+    m_timingPresetEdit->setToolTip(tr("正式比赛的单局时长和局间准备时间；一场 BO3 开始后到结束前不能切换"));
+    connect(m_timingPresetEdit, qOverload<int>(&QComboBox::activated),
+            this, &MainWindow::onTimingPresetChanged);
+    m_timingPresetEditBtn = new QPushButton(tr("编辑预设…"), matchGroup);
+    m_timingPresetEditBtn->setObjectName(QStringLiteral("editTimingPresets"));
+    connect(m_timingPresetEditBtn, &QPushButton::clicked, this, &MainWindow::onEditTimingPresets);
+    timingRow->addWidget(m_timingPresetEdit, 1);
+    timingRow->addWidget(m_timingPresetEditBtn);
+    matchLayout->addRow(tr("比赛时间"), timingRow);
     m_noDeviceDebugEdit = new QCheckBox(tr("无车调试（跳过设备检查，仅用于测试）"), matchGroup);
     m_noDeviceDebugEdit->setObjectName(QStringLiteral("noDeviceDebug"));
     m_noDeviceDebugEdit->setToolTip(tr("开赛不绑定机器人、不发送 GAME_START、不等待设备确认；"
@@ -753,18 +781,10 @@ void MainWindow::buildUi()
     scoreRow->addWidget(m_clearCardsBtn, 3, 0, 1, 2);
 
     teamLayout->addLayout(scoreRow);
-    m_cardTargetLabel = new QLabel(tr("判罚对象：未选择 · 请到「状态」页选择机器人"), teamGroup);
+    m_cardTargetLabel = new QLabel(tr("判罚对象：未选择 · 请在机器人状态表中选择"), teamGroup);
     m_cardTargetLabel->setObjectName(QStringLiteral("cardTarget"));
     m_cardTargetLabel->setWordWrap(true);
     teamLayout->addWidget(m_cardTargetLabel);
-    auto *selectCardTarget = new QPushButton(tr("选择判罚机器人 → 状态页"), teamGroup);
-    connect(selectCardTarget, &QPushButton::clicked, this, [this] {
-        m_controlTabs->setCurrentIndex(0);
-        if (m_compactTabs->isVisible()) m_compactTabs->setCurrentWidget(m_controlTabs);
-        m_table->setFocus();
-        showActionResult(tr("请在中央状态表选择判罚对象"), QStringLiteral("info"));
-    });
-    teamLayout->addWidget(selectCardTarget);
 
     auto *programGroup = createGroup(tr("节目输出与字幕"));
     auto *programLayout = new QFormLayout(programGroup);
@@ -998,6 +1018,47 @@ void MainWindow::buildUi()
     clientRow->addWidget(m_clientStateLabel, 1);
     networkLayout->addRow(tr("选手端 TCP"), clientRow);
 
+    // Manual HP deduction web page for phones on the same LAN.
+    auto *damageRow = new QHBoxLayout;
+    m_damagePortEdit = new QSpinBox(networkGroup);
+    m_damagePortEdit->setObjectName(QStringLiteral("damageHttpPort"));
+    m_damagePortEdit->setRange(1, 65535);
+    m_damageServerBtn = new QPushButton(tr("启动扣血网页"), networkGroup);
+    m_damageServerBtn->setObjectName(QStringLiteral("toggleDamageServer"));
+    connect(m_damageServerBtn, &QPushButton::clicked, this, &MainWindow::onToggleManualDamageServer);
+    m_damageQrBtn = new QPushButton(tr("扫码入口"), networkGroup);
+    m_damageQrBtn->setObjectName(QStringLiteral("showDamageQr"));
+    m_damageQrBtn->setEnabled(false);
+    connect(m_damageQrBtn, &QPushButton::clicked, this, &MainWindow::onShowManualDamageQr);
+    damageRow->addWidget(m_damagePortEdit);
+    damageRow->addWidget(m_damageServerBtn);
+    damageRow->addWidget(m_damageQrBtn);
+    networkLayout->addRow(tr("扣血网页 HTTP"), damageRow);
+    auto *amountRow = new QHBoxLayout;
+    m_damageAmountEdit = new QSpinBox(networkGroup);
+    m_damageAmountEdit->setObjectName(QStringLiteral("damageAmount"));
+    m_damageAmountEdit->setRange(1, 300);
+    m_damageAmountEdit->setSuffix(tr(" HP / 次"));
+    m_damageStateLabel = new QLabel(tr("未启动"), networkGroup);
+    m_damageStateLabel->setObjectName(QStringLiteral("damageServerState"));
+    m_damageStateLabel->setWordWrap(true);
+    m_damageStateLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    amountRow->addWidget(m_damageAmountEdit);
+    amountRow->addStretch(1);
+    networkLayout->addRow(tr("每次扣血"), amountRow);
+    networkLayout->addRow(tr("网页地址"), m_damageStateLabel);
+    {
+        QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                    QStringLiteral("Scompetition"), QStringLiteral("ManualDamage"));
+        m_damagePortEdit->setValue(s.value(QStringLiteral("port"), 8080).toInt());
+        m_damageAmountEdit->setValue(s.value(QStringLiteral("amount"), 10).toInt());
+    }
+    connect(m_damageAmountEdit, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) {
+        QSettings s(QSettings::defaultFormat(), QSettings::UserScope,
+                    QStringLiteral("Scompetition"), QStringLiteral("ManualDamage"));
+        s.setValue(QStringLiteral("amount"), v);
+    });
+
     // 设备管理面板：V2 中 team 不再来自数据包，需服务器侧分配
     auto *deviceGroup = new QGroupBox(tr("设备管理"), central);
     auto *deviceLayout = new QVBoxLayout(deviceGroup);
@@ -1108,7 +1169,7 @@ void MainWindow::buildUi()
         if (m_cardTargetLabel)
             m_cardTargetLabel->setText(id && team
                 ? tr("判罚对象：机器人 %1 · 队伍 %2").arg(id->text(), team->text())
-                : tr("判罚对象：未选择 · 请到「状态」页选择机器人"));
+                : tr("判罚对象：未选择 · 请在机器人状态表中选择"));
     });
     m_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_table->horizontalHeader()->setSectionResizeMode(kColAddr, QHeaderView::Stretch);
@@ -1476,6 +1537,9 @@ QJsonObject MainWindow::competitionSnapshot() const
         {"serverTimestamp", double(QDateTime::currentMSecsSinceEpoch())},
         {"running", m_competition.phase() == CompetitionFlow::Phase::Running}, {"suddenDeath", false},
         {"redScore", m_competition.wins(1)}, {"blueScore", m_competition.wins(2)},
+        {"roundDurationSeconds", m_competition.roundMs() / 1000},
+        {"intermissionSeconds", m_competition.intermissionMs() / 1000},
+        {"timingPreset", m_timingPresetName},
         {"redRemainingRevives", m_competition.remainingRevives(1)},
         {"blueRemainingRevives", m_competition.remainingRevives(2)},
         {"redRevivePending", m_competition.revivePending(1)}, {"blueRevivePending", m_competition.revivePending(2)},
@@ -1510,7 +1574,8 @@ void MainWindow::updateCompetition()
             m_lastRoundSummary = {};
             m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement(); m_broadcast->clearCards();
             persistCompetitionLedger();
-            showActionResult(tr("[无车调试] 小局开始 · 180 秒 · 未发送设备命令，需裁判手动判定"), QStringLiteral("info"));
+            showActionResult(tr("[无车调试] 小局开始 · %1 · 未发送设备命令，需裁判手动判定")
+                                 .arg(matchtiming::durationText(m_competition.roundMs() / 1000)), QStringLiteral("info"));
         } else {
             m_startAcknowledged.clear();
             m_startRequestEpochMs = QDateTime::currentMSecsSinceEpoch(); m_startRequestMonotonicMs = now;
@@ -1530,7 +1595,8 @@ void MainWindow::updateCompetition()
             m_lastRoundSummary = {};
             m_broadcast->clearMatchSummary(); m_broadcast->clearSettlement(); m_broadcast->clearCards();
             persistCompetitionLedger();
-            showActionResult(tr("双方设备已确认，正式小局开始 · 180 秒"));
+            showActionResult(tr("双方设备已确认，正式小局开始 · %1")
+                                 .arg(matchtiming::durationText(m_competition.roundMs() / 1000)));
         } else if (now - m_startRequestMonotonicMs > 3000) {
             m_competition.cancelStart(); sendGameCommand(false);
             showActionResult(tr("设备开赛状态未确认，已发送结束命令，请检查后重新开赛"), QStringLiteral("error"));
@@ -1543,7 +1609,7 @@ void MainWindow::updateCompetition()
         persistCompetitionLedger();
     }
     if (event == CompetitionFlow::Event::PreparationComplete)
-        showActionResult(tr("2 分钟局间准备结束，请裁判确认后开始下一局"));
+        showActionResult(tr("局间准备结束，请裁判确认后开始下一局"));
     ++m_competitionRevision;
     refreshCompetitionUi();
     publishMatchState();
@@ -1574,6 +1640,9 @@ void MainWindow::refreshCompetitionUi()
     m_applyTeamPairBtn->setEnabled(!locked && !m_teamPairs.isEmpty());
     m_redTeamNameEdit->setReadOnly(locked); m_blueTeamNameEdit->setReadOnly(locked);
     m_ruleProfileEdit->setEnabled(!locked);
+    // One BO3 always uses one timing: switching is blocked from the first
+    // countdown through the last intermission (CompetitionFlow::locked()).
+    if (m_timingPresetEdit) m_timingPresetEdit->setEnabled(!m_competition.timingLocked());
     if (m_noDeviceDebugEdit)
         m_noDeviceDebugEdit->setEnabled(phase != CompetitionFlow::Phase::Countdown && phase != CompetitionFlow::Phase::Starting
             && phase != CompetitionFlow::Phase::Running && phase != CompetitionFlow::Phase::AwaitingDecision);
@@ -1883,7 +1952,9 @@ void MainWindow::onRefereeRulesChanged()
     m_redScoreEdit->setReadOnly(competitionMode()); m_blueScoreEdit->setReadOnly(competitionMode());
     if (m_redScoreLabel) m_redScoreLabel->setText(competitionMode() ? tr("红方 BO3 胜局") : tr("红方击杀积分"));
     if (m_blueScoreLabel) m_blueScoreLabel->setText(competitionMode() ? tr("蓝方 BO3 胜局") : tr("蓝方击杀积分"));
-    if (m_broadcast) m_broadcast->setClockDuration(competitionMode() ? 180 : 60);
+    if (m_broadcast) m_broadcast->setClockDuration(competitionMode() ? m_competition.roundMs() / 1000 : 60);
+    if (m_timingPresetEdit) m_timingPresetEdit->setVisible(competitionMode());
+    if (m_timingPresetEditBtn) m_timingPresetEditBtn->setVisible(competitionMode());
     m_referee.setRules(rules);
 
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope,
@@ -1896,6 +1967,97 @@ void MainWindow::onRefereeRulesChanged()
                  settings.status() == QSettings::NoError ? QStringLiteral("success") : QStringLiteral("error"));
     refreshCompetitionUi();
     refreshRefereeStatus();
+}
+
+void MainWindow::loadTimingPresets()
+{
+    QString selected;
+    m_timingPresets = matchtiming::load(&selected);
+    refreshTimingPresetCombo();
+    applyTimingPreset(selected, false);
+}
+
+void MainWindow::refreshTimingPresetCombo()
+{
+    if (!m_timingPresetEdit) return;
+    const QSignalBlocker blocker(m_timingPresetEdit);
+    m_timingPresetEdit->clear();
+    for (const MatchTimingPreset &p : m_timingPresets)
+        m_timingPresetEdit->addItem(tr("%1 · %2").arg(p.name, matchtiming::summary(p)), p.name);
+    const int index = m_timingPresetEdit->findData(m_timingPresetName);
+    m_timingPresetEdit->setCurrentIndex(index >= 0 ? index : 0);
+}
+
+bool MainWindow::applyTimingPreset(const QString &name, bool persist)
+{
+    const MatchTimingPreset *preset = nullptr;
+    for (const MatchTimingPreset &p : m_timingPresets)
+        if (p.name == name) preset = &p;
+    if (!preset && !m_timingPresets.isEmpty()) preset = &m_timingPresets.constLast();
+    if (!preset) return false;
+    if (!m_competition.setTimings(preset->roundSeconds * 1000, preset->intermissionSeconds * 1000)) {
+        // Locked (live round / intermission): keep the active timing.
+        if (m_timingPresetEdit) refreshTimingPresetCombo();
+        return false;
+    }
+    m_timingPresetName = preset->name;
+    if (m_timingPresetEdit) {
+        const QSignalBlocker blocker(m_timingPresetEdit);
+        m_timingPresetEdit->setCurrentIndex(qMax(0, m_timingPresetEdit->findData(m_timingPresetName)));
+        m_timingPresetEdit->setToolTip(tr("当前：%1 · %2").arg(preset->name, matchtiming::summary(*preset)));
+    }
+    if (m_broadcast && competitionMode()) m_broadcast->setClockDuration(preset->roundSeconds);
+    if (persist && !matchtiming::save(m_timingPresets, m_timingPresetName))
+        showActionResult(tr("比赛时间预设已应用，但保存失败"), QStringLiteral("error"));
+    return true;
+}
+
+void MainWindow::onTimingPresetChanged(int index)
+{
+    if (!m_timingPresetEdit || index < 0) return;
+    const QString name = m_timingPresetEdit->itemData(index).toString();
+    if (name == m_timingPresetName) return;
+    if (!applyTimingPreset(name, true)) {
+        showActionResult(tr("本场 BO3 未结束，不能切换比赛时间；请等比赛结束或重置 BO3"), QStringLiteral("error"));
+        return;
+    }
+    onLogMessage(tr("[规则] 比赛时间预设：%1 · %2").arg(m_timingPresetName,
+        matchtiming::summary({m_timingPresetName, m_competition.roundMs() / 1000,
+                              m_competition.intermissionMs() / 1000})));
+    showActionResult(tr("比赛时间已切换为「%1」，下一局生效").arg(m_timingPresetName));
+    syncRefereeState();
+    refreshCompetitionUi();
+    publishMatchState();
+}
+
+void MainWindow::onEditTimingPresets()
+{
+    MatchTimingDialog dialog(m_timingPresets, m_timingPresetName, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const QVector<MatchTimingPreset> edited = dialog.presets();
+    const QString active = m_timingPresetName;
+    m_timingPresets = edited;
+    // Keep the active preset if it still exists; otherwise take the one that
+    // was selected in the editor. A locked match keeps its running timing.
+    QString next = active;
+    bool exists = false;
+    for (const MatchTimingPreset &p : m_timingPresets) exists = exists || p.name == active;
+    if (!exists) next = dialog.currentName();
+    if (!m_competition.timingLocked()) {
+        applyTimingPreset(next, false);
+    } else if (!exists) {
+        showActionResult(tr("当前比赛仍按原时长进行，比赛结束后再选择新预设"), QStringLiteral("info"));
+    }
+    refreshTimingPresetCombo();
+    if (!matchtiming::save(m_timingPresets, exists ? active : next)) {
+        showActionResult(tr("比赛时间预设保存失败"), QStringLiteral("error"));
+    } else {
+        onLogMessage(tr("[规则] 比赛时间预设已更新（共 %1 个）").arg(m_timingPresets.size()));
+        showActionResult(tr("比赛时间预设已保存"));
+    }
+    syncRefereeState();
+    refreshCompetitionUi();
+    publishMatchState();
 }
 
 void MainWindow::onNoDeviceDebugToggled(bool enabled)
@@ -3285,7 +3447,7 @@ void MainWindow::refreshTable()
         auto *id = selectedRow >= 0 ? m_table->item(selectedRow, kColId) : nullptr;
         auto *team = selectedRow >= 0 ? m_table->item(selectedRow, kColTeam) : nullptr;
         m_cardTargetLabel->setText(id && team ? tr("判罚对象：机器人 %1 · 队伍 %2").arg(id->text(), team->text())
-                                            : tr("判罚对象：未选择 · 请到「状态」页选择机器人"));
+                                            : tr("判罚对象：未选择 · 请在机器人状态表中选择"));
     }
 
     statusBar()->showMessage(tr("在线 %1 / %2 台机器人").arg(onlineCount).arg(kExpectedRobots));

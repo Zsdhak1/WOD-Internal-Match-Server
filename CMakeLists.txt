@@ -63,6 +63,16 @@ set(PROJECT_SOURCES
         mainwindow.h
         competitionflow.cpp
         competitionflow.h
+        matchtimingpresets.cpp
+        matchtimingpresets.h
+        matchtimingdialog.cpp
+        matchtimingdialog.h
+        manualdamageserver.cpp
+        manualdamageserver.h
+        manualdamagepage.cpp
+        mainwindow_manualdamage.cpp
+        third_party/qrcodegen/qrcodegen.cpp
+        third_party/qrcodegen/qrcodegen.hpp
         refereeentrypanel.cpp
         refereeentrypanel.h
         fieldcamera.cpp
@@ -242,7 +252,9 @@ add_executable(SimulatorIntegrationTest
     robotmanager.cpp robotmanager.h
     robotcommander.cpp robotcommander.h
     matchreferee.cpp matchreferee.h
-    matchserver.cpp matchserver.h)
+    matchserver.cpp matchserver.h
+    matchtimingpresets.cpp matchtimingpresets.h matchtimingdialog.cpp matchtimingdialog.h
+    manualdamageserver.cpp manualdamageserver.h manualdamagepage.cpp mainwindow_manualdamage.cpp third_party/qrcodegen/qrcodegen.cpp third_party/qrcodegen/qrcodegen.hpp)
 target_include_directories(SimulatorIntegrationTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(SimulatorIntegrationTest PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -297,6 +309,14 @@ add_executable(NoDeviceDebugTest tools/no_device_debug_test.cpp ${_competition_i
 target_include_directories(NoDeviceDebugTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(NoDeviceDebugTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(ManualDamageTest tools/manual_damage_test.cpp ${_competition_integration_sources})
+target_include_directories(ManualDamageTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(ManualDamageTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(MatchTimingPresetTest tools/match_timing_preset_test.cpp ${_competition_integration_sources})
+target_include_directories(MatchTimingPresetTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(MatchTimingPresetTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 
 enable_testing()
 add_test(NAME competition_flow COMMAND CompetitionFlowTest)
@@ -305,7 +325,10 @@ add_test(NAME referee_entry_panel COMMAND RefereeEntryPanelTest)
 add_test(NAME competition_ui COMMAND CompetitionUiTest)
 add_test(NAME competition_integration COMMAND CompetitionIntegrationTest)
 add_test(NAME no_device_debug COMMAND NoDeviceDebugTest)
-set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug PROPERTIES
+add_test(NAME match_timing_presets COMMAND MatchTimingPresetTest)
+add_test(NAME manual_damage COMMAND ManualDamageTest)
+set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug
+    match_timing_presets manual_damage PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES

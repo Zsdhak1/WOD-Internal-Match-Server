@@ -105,7 +105,7 @@ int main(int argc, char **argv)
         call(main, "onToggleMatch"); now += 6000; call(main, "onRefereeTick"); settle();
         check(!bw->isMatchRunning(), "device checks not restored after debug off");
 
-        std::puts("PASS: no-device debug runs the formal BO3 flow without robots; formal mode still requires devices");
+        std::puts("PASS: no-device debug runs the formal BO3 flow without robots; formal mode still requires devices"); std::fflush(stdout);
         return 0;
     } catch (const std::exception &e) { std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1; }
 }

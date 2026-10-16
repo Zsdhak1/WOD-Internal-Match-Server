@@ -27,13 +27,27 @@ public:
     struct RequestResult { RequestAction action = RequestAction::Ignore; QString key; };
 
     static constexpr int kCountdownMs = 5000;
+    // Defaults (knockout preset). The active values come from setTimings().
     static constexpr int kRoundMs = 180000;
     static constexpr int kIntermissionMs = 120000;
+    static constexpr int kMinRoundMs = 10000;
+    static constexpr int kMaxRoundMs = 30 * 60000;
+    static constexpr int kMaxIntermissionMs = 30 * 60000;
     static constexpr int kReviveDelayMs = 5000;
     static constexpr int kReviveLimit = 3;
 
     CompetitionFlow();
     void resetSeries(); // Keep the global decision ledger; never revive old requests.
+    // Round / intermission length for the next round. Rejected (false) while a
+    // round or intermission is live, or out of range; durations never change
+    // under a running deadline.
+    bool setTimings(int roundMs, int intermissionMs);
+    // True from the first countdown until the BO3 is decided or reset, so one
+    // series never mixes durations (also between rounds once a round is won).
+    bool timingLocked() const
+    { return locked() || (m_phase != Phase::MatchFinished && (m_wins[0] + m_wins[1] > 0 || m_advanceRound)); }
+    int roundMs() const { return m_roundMs; }
+    int intermissionMs() const { return m_intermissionMs; }
     bool beginCountdown(qint64 nowMs);
     bool cancelCountdown();
     bool confirmStart(qint64 nowMs);
@@ -71,6 +85,8 @@ private:
     int m_roundIndex = 1;
     bool m_advanceRound = false;
     qint64 m_deadline = -1;
+    int m_roundMs = kRoundMs;
+    int m_intermissionMs = kIntermissionMs;
     int m_frozenRemaining = 0;
     int m_wins[2] = {0, 0};
     int m_remaining[2] = {3, 3};

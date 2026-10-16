@@ -1,0 +1,5 @@
+QR Code generator library (C++), Project Nayuki
+Source:  https://github.com/nayuki/QR-Code-generator  tag v1.8.0  (cpp/qrcodegen.cpp, cpp/qrcodegen.hpp)
+License: MIT (see header of qrcodegen.hpp)
+Used by: manualdamageserver.cpp to render the red/blue page QR codes in the server console.
+Files are unmodified.
