@@ -6,39 +6,41 @@
 #include <QCameraFormat>
 #include <QMediaCaptureSession>
 #include <QMediaDevices>
+#include <QThread>
 #include <QTimer>
 #include <QVideoFrame>
 #include <QVideoSink>
+#include <atomic>
 #include <utility>
 
 namespace {
-class QtFieldCameraBackend final : public FieldCameraBackend
+// Everything that can block lives on this worker thread: device enumeration
+// (~250 ms after a hot-plug), QCamera::start/stop (stop ~600 ms on Windows
+// Media Foundation) and QVideoFrame::toImage (several ms per native frame,
+// spikes >100 ms). The GUI thread only receives finished QImages, so plugging
+// a camera in or out no longer freezes the console.
+class CameraWorker final : public QObject
 {
+    Q_OBJECT
 public:
-    explicit QtFieldCameraBackend(QObject *parent = nullptr) : FieldCameraBackend(parent)
-    {
-        auto *media = new QMediaDevices(this);
-        connect(media, &QMediaDevices::videoInputsChanged, this,
-                &FieldCameraBackend::devicesChanged);
-    }
-    QVector<FieldCameraDevice> devices() const override
+    std::atomic<quint64> generation{0};
+    std::atomic<bool> framePending{false};   // drop frames while the GUI is still busy
+
+    void enumerate()
     {
         QVector<FieldCameraDevice> result;
         for (const auto &device : QMediaDevices::videoInputs())
             result.append({device.id(), device.description()});
-        return result;
+        emit devicesReady(result);
     }
-    void start(const QByteArray &id) override
+    void open(const QByteArray &id, quint64 gen)
     {
-        stop();
+        close();
+        if (gen != generation.load()) return;   // superseded while queued
         QCameraDevice selected;
-        for (const auto &device : QMediaDevices::videoInputs()) {
+        for (const auto &device : QMediaDevices::videoInputs())
             if (device.id() == id) { selected = device; break; }
-        }
-        if (selected.isNull()) {
-            emit captureError(tr("所选摄像头已断开"));
-            return;
-        }
+        if (selected.isNull()) { emit failed(tr("所选摄像头已断开"), gen); return; }
         m_session = new QMediaCaptureSession(this);
         m_camera = new QCamera(selected, this);
         m_sink = new QVideoSink(this);
@@ -48,36 +50,96 @@ public:
         // that still reaches 30 FPS (previews downscale to <=720p themselves).
         const QCameraFormat best = videoformat::chooseNative(selected.videoFormats(), false);
         if (!best.isNull()) m_camera->setCameraFormat(best);
-        const auto generation = m_generation;
-        connect(m_sink, &QVideoSink::videoFrameChanged, this,
-                [this, generation](const QVideoFrame &frame) {
-            if (generation != m_generation || !frame.isValid()) return;
+        connect(m_sink, &QVideoSink::videoFrameChanged, this, [this, gen](const QVideoFrame &frame) {
+            if (gen != generation.load() || !frame.isValid()) return;
+            if (framePending.exchange(true)) return;   // GUI has not taken the last one yet
             const QImage image = frame.toImage();
-            if (!image.isNull()) emit frameReady(image);
+            if (image.isNull()) { framePending = false; return; }
+            emit frameConverted(image, gen);
         });
-        connect(m_camera, &QCamera::errorOccurred, this,
-                [this, generation](QCamera::Error, const QString &message) {
-            if (generation == m_generation) emit captureError(message);
+        connect(m_camera, &QCamera::errorOccurred, this, [this, gen](QCamera::Error, const QString &message) {
+            emit failed(message, gen);
         });
         m_camera->start();
     }
-    void stop() override
+    void close()
     {
-        ++m_generation;
         if (m_sink) m_sink->disconnect(this);
         if (m_camera) { m_camera->disconnect(this); m_camera->stop(); }
         if (m_session) { m_session->setCamera(nullptr); m_session->setVideoSink(nullptr); }
-        // deleteLater is safe even when recovery originates inside an error signal.
-        if (m_camera) m_camera->deleteLater();
-        if (m_sink) m_sink->deleteLater();
-        if (m_session) m_session->deleteLater();
+        delete m_session; delete m_camera; delete m_sink;
         m_camera = nullptr; m_sink = nullptr; m_session = nullptr;
+        framePending = false;
     }
+signals:
+    void devicesReady(const QVector<FieldCameraDevice> &devices);
+    void frameConverted(const QImage &image, quint64 gen);
+    void failed(const QString &message, quint64 gen);
 private:
     QCamera *m_camera = nullptr;
     QVideoSink *m_sink = nullptr;
     QMediaCaptureSession *m_session = nullptr;
-    quint64 m_generation = 0;
+};
+
+class QtFieldCameraBackend final : public FieldCameraBackend
+{
+public:
+    explicit QtFieldCameraBackend(QObject *parent = nullptr) : FieldCameraBackend(parent)
+    {
+        m_thread.setObjectName(QStringLiteral("FieldCameraWorker"));
+        m_worker = new CameraWorker;
+        m_worker->moveToThread(&m_thread);
+        connect(&m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
+        connect(m_worker, &CameraWorker::devicesReady, this, [this](const QVector<FieldCameraDevice> &list) {
+            const bool changed = !sameDevices(list, m_devices) || !m_enumerated;
+            m_devices = list; m_enumerated = true;
+            if (changed) emit devicesChanged();
+        });
+        connect(m_worker, &CameraWorker::frameConverted, this, [this](const QImage &image, quint64 gen) {
+            m_worker->framePending = false;
+            if (gen == m_worker->generation.load()) emit frameReady(image);
+        });
+        connect(m_worker, &CameraWorker::failed, this, [this](const QString &message, quint64 gen) {
+            if (gen == m_worker->generation.load()) emit captureError(message);
+        });
+        m_thread.start();
+        auto *media = new QMediaDevices(this);
+        connect(media, &QMediaDevices::videoInputsChanged, this, [this] {
+            QMetaObject::invokeMethod(m_worker, &CameraWorker::enumerate, Qt::QueuedConnection);
+        });
+        QMetaObject::invokeMethod(m_worker, &CameraWorker::enumerate, Qt::QueuedConnection);
+    }
+    ~QtFieldCameraBackend() override
+    {
+        ++m_worker->generation;
+        QMetaObject::invokeMethod(m_worker, &CameraWorker::close, Qt::QueuedConnection);
+        m_thread.quit();
+        m_thread.wait(3000);
+    }
+    // Cached list from the worker; never enumerates on the caller's thread.
+    QVector<FieldCameraDevice> devices() const override { return m_devices; }
+    void start(const QByteArray &id) override
+    {
+        const quint64 gen = ++m_worker->generation;
+        QMetaObject::invokeMethod(m_worker, [w = m_worker, id, gen] { w->open(id, gen); }, Qt::QueuedConnection);
+    }
+    void stop() override
+    {
+        ++m_worker->generation;   // frames/errors from the old session are ignored from now on
+        QMetaObject::invokeMethod(m_worker, &CameraWorker::close, Qt::QueuedConnection);
+    }
+private:
+    static bool sameDevices(const QVector<FieldCameraDevice> &a, const QVector<FieldCameraDevice> &b)
+    {
+        if (a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); ++i)
+            if (a[i].id != b[i].id || a[i].name != b[i].name) return false;
+        return true;
+    }
+    QThread m_thread;
+    CameraWorker *m_worker = nullptr;
+    QVector<FieldCameraDevice> m_devices;
+    bool m_enumerated = false;
 };
 }
 
@@ -210,3 +272,5 @@ void FieldCamera::watchdog()
     if (m_requested && m_acceptFrames && m_frameClock.isValid() && m_frameClock.elapsed() > 6000)
         retry(tr("6 秒未收到视频帧（设备占用、权限受限或采集停滞）"));
 }
+
+#include "fieldcamera.moc"

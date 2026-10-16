@@ -231,10 +231,8 @@ void MatchServer::onVideoReadyRead(quint8 team)
             Q_UNUSED(pending);
             emit logMessage(tr("%1 方视频解码延迟过大，重启解码器以清除积压")
                                 .arg(team == kRedTeam ? tr("红") : tr("蓝")));
-            m_videoDecoders.remove(team);
+            stopVideoDecoder(team);   // non-blocking kill + delete on exit
             m_videoBuffers.remove(team);
-            decoder->kill();
-            decoder->deleteLater();
             break;
         }
         decoder->write(datagram.data());
@@ -316,12 +314,13 @@ void MatchServer::stopVideoDecoder(quint8 team)
     QProcess *decoder = m_videoDecoders.take(team);
     if (!decoder)
         return;
+    decoder->disconnect(this);
     decoder->closeWriteChannel();
-    if (decoder->state() != QProcess::NotRunning) {
-        decoder->kill();
-        decoder->waitForFinished(300);
-    }
-    decoder->deleteLater();
+    if (decoder->state() == QProcess::NotRunning) { decoder->deleteLater(); return; }
+    // Never wait on the GUI thread: kill and delete once the process has
+    // actually exited (deleting a running QProcess would block in its dtor).
+    connect(decoder, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), decoder, &QObject::deleteLater);
+    decoder->kill();
 }
 
 void MatchServer::consumeVideoOutput(quint8 team)

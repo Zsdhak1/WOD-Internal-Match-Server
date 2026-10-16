@@ -16,7 +16,12 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QGraphicsEffect>
 #include <QGraphicsOpacityEffect>
+#include <QLinearGradient>
+#include <QPointer>
+#include <QRadialGradient>
+#include <QtMath>
 #include <QGridLayout>
 #include <QElapsedTimer>
 #include <QJsonArray>
@@ -1033,6 +1038,168 @@ private:
     bool m_healthRibbon = false;
 };
 
+// HUD overlay root. Paints a soft-edged dark backing under the top HUD so the
+// glass artwork, countdown and team text stay readable over overexposed or
+// white program video (sunlit field, white walls). No hard edge: the band
+// fades to fully transparent well above the play area.
+class HudOverlayWidget final : public QWidget
+{
+public:
+    using QWidget::QWidget;
+    void setTopShadow(bool on) { if (m_topShadow != on) { m_topShadow = on; update(); } }
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        if (!m_topShadow) return;
+        // Repaints happen on every video frame underneath; draw the gradients
+        // once per size/viewport and blit the cached band afterwards.
+        const QRect vp = property("hudViewport").toRect().isValid() ? property("hudViewport").toRect() : rect();
+        const qreal dpr = devicePixelRatioF();
+        if (m_band.isNull() || m_bandSize != size() || m_bandViewport != vp || !qFuzzyCompare(m_band.devicePixelRatio(), dpr)) {
+            m_bandSize = size(); m_bandViewport = vp;
+            const int bandHeight = qMin(height(), vp.top() + qCeil(260 * vp.height() / 1080.0) + 1);
+            QImage img(QSize(width(), qMax(1, bandHeight)) * dpr, QImage::Format_ARGB32_Premultiplied);
+            img.setDevicePixelRatio(dpr);
+            img.fill(Qt::transparent);
+            QPainter painter(&img);
+            paintBand(painter, vp);
+            painter.end();
+            m_band = QPixmap::fromImage(img);
+        }
+        QPainter p(this);
+        p.setClipRegion(event->region());
+        p.drawPixmap(0, 0, m_band);
+    }
+private:
+    void paintBand(QPainter &p, const QRect &vp)
+    {
+        const qreal s = vp.height() / 1080.0;
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        // Full-width vertical fade (top 260 authored px).
+        const qreal band = 260 * s;
+        QLinearGradient fade(0, vp.top(), 0, vp.top() + band);
+        fade.setColorAt(0.00, QColor(4, 10, 16, 178));
+        fade.setColorAt(0.45, QColor(4, 10, 16, 115));
+        fade.setColorAt(0.75, QColor(4, 10, 16, 38));
+        fade.setColorAt(1.00, QColor(4, 10, 16, 0));
+        p.fillRect(QRectF(0, vp.top(), width(), band), fade);
+        // Extra soft pool behind the centre countdown artwork.
+        const QPointF c(vp.center().x(), vp.top() + 95 * s);
+        QRadialGradient pool(c, 1.0);
+        pool.setColorAt(0.0, QColor(2, 8, 14, 105));
+        pool.setColorAt(0.5, QColor(2, 8, 14, 55));
+        pool.setColorAt(1.0, QColor(2, 8, 14, 0));
+        p.save();
+        p.translate(c);
+        p.scale(500 * s, 140 * s);
+        p.translate(-c);
+        p.setBrush(pool);
+        p.drawEllipse(c, 1.0, 1.0);
+        p.restore();
+    }
+    bool m_topShadow = true;
+    QPixmap m_band;
+    QSize m_bandSize;
+    QRect m_bandViewport;
+};
+
+// Three-pass box blur of the alpha channel (≈ Gaussian), in place.
+static void blurAlpha(QImage &img, int radius)
+{
+    if (radius < 1) return;
+    const int w = img.width(), h = img.height();
+    QVector<int> line(qMax(w, h)), out(qMax(w, h));
+    const auto pass = [&](int n, auto get, auto set) {
+        int sum = 0; const int win = 2 * radius + 1;
+        for (int i = -radius; i <= radius; ++i) sum += get(qBound(0, i, n - 1));
+        for (int i = 0; i < n; ++i) {
+            out[i] = sum / win;
+            sum += get(qMin(n - 1, i + radius + 1)) - get(qMax(0, i - radius));
+        }
+        for (int i = 0; i < n; ++i) set(i, out[i]);
+    };
+    for (int iter = 0; iter < 3; ++iter) {
+        for (int y = 0; y < h; ++y) {
+            QRgb *row = reinterpret_cast<QRgb *>(img.scanLine(y));
+            pass(w, [&](int x) { return qAlpha(row[x]); }, [&](int x, int a) { row[x] = qRgba(0, 0, 0, a); });
+        }
+        for (int x = 0; x < w; ++x)
+            pass(h, [&](int y) { return qAlpha(reinterpret_cast<const QRgb *>(img.constScanLine(y))[x]); },
+                 [&](int y, int a) { reinterpret_cast<QRgb *>(img.scanLine(y))[x] = qRgba(0, 0, 0, a); });
+    }
+}
+
+// Soft drop shadow for HUD text that is blurred only when the label's own
+// content changes (text, size, colour, font). The HUD sits over live video,
+// so its labels repaint on every video frame; QGraphicsDropShadowEffect would
+// re-blur each time, this effect just blits the cached result.
+class CachedTextShadow final : public QGraphicsEffect
+{
+public:
+    explicit CachedTextShadow(QWidget *target) : QGraphicsEffect(target), m_target(target) {}
+    void setParams(qreal blur, qreal dy, const QColor &color)
+    {
+        m_blur = blur; m_dy = dy; m_color = color; m_key.clear();
+        updateBoundingRect(); update();
+    }
+    QRectF boundingRectFor(const QRectF &rect) const override
+    {
+        const qreal m = m_blur + qAbs(m_dy);
+        return rect.adjusted(-m, -m, m, m);
+    }
+protected:
+    void draw(QPainter *painter) override
+    {
+        auto *label = qobject_cast<QLabel *>(m_target.data());
+        const QString key = label ? label->text() + QChar(1) + QString::number(label->width()) + QChar('x')
+                                        + QString::number(label->height()) + QChar(1)
+                                        + label->palette().color(QPalette::WindowText).name(QColor::HexArgb)
+                                        + QChar(1) + label->font().toString() + QChar(1) + label->styleSheet()
+                                  : QString();
+        if (key.isEmpty() || key != m_key || m_cache.isNull()) {
+            QPoint offset;
+            const QPixmap source = sourcePixmap(Qt::LogicalCoordinates, &offset, QGraphicsEffect::PadToEffectiveBoundingRect);
+            if (source.isNull()) return;
+            const qreal dpr = source.devicePixelRatio();
+            QImage shadow = source.toImage().convertToFormat(QImage::Format_ARGB32);
+            blurAlpha(shadow, qMax(1, qRound(m_blur * dpr / 3.0)));
+            QImage result(source.size(), QImage::Format_ARGB32_Premultiplied);
+            result.fill(Qt::transparent);
+            {
+                QPainter p(&result);
+                // Tint the blurred alpha with the shadow colour.
+                QImage tinted(shadow.size(), QImage::Format_ARGB32_Premultiplied);
+                tinted.fill(m_color);
+                { QPainter t(&tinted); t.setCompositionMode(QPainter::CompositionMode_DestinationIn); t.drawImage(0, 0, shadow); }
+                p.drawImage(QPointF(0, m_dy * dpr), tinted);
+                p.drawPixmap(0, 0, source);
+            }
+            m_cache = QPixmap::fromImage(result);
+            m_cache.setDevicePixelRatio(dpr);
+            m_offset = offset;
+            m_key = key;
+        }
+        painter->drawPixmap(m_offset, m_cache);
+    }
+private:
+    QPointer<QWidget> m_target;
+    qreal m_blur = 14, m_dy = 2;
+    QColor m_color{0, 6, 12, 230};
+    QString m_key;
+    QPixmap m_cache;
+    QPoint m_offset;
+};
+
+// Soft dark halo behind HUD text (countdown, scores, title, team names).
+static void applyTextShadow(QWidget *w, qreal scale, qreal blur = 14, qreal dy = 2, int alpha = 230)
+{
+    if (!w) return;
+    auto *e = dynamic_cast<CachedTextShadow *>(w->graphicsEffect());
+    if (!e) { e = new CachedTextShadow(w); w->setGraphicsEffect(e); }
+    e->setParams(blur * scale, dy * scale, QColor(0, 6, 12, alpha));
+}
+
 class CenterHudCanvas final : public QWidget
 {
 public:
@@ -1726,7 +1893,8 @@ void BroadcastWindow::buildUi()
     m_programView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     stack->addWidget(m_programView, 0, 0);
 
-    auto *overlay = new QWidget(central);
+    auto *overlay = new HudOverlayWidget(central);
+    overlay->setObjectName(QStringLiteral("hudOverlay"));
     overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     overlay->setStyleSheet(QStringLiteral("background: transparent;"));
     m_hudOverlay = overlay;
@@ -2897,14 +3065,12 @@ void BroadcastWindow::stopSettlement()
         return;
 
     process->disconnect(this);
-    if (process->state() != QProcess::NotRunning) {
-        process->kill();
-        process->waitForFinished(1000);
-    }
-    if (process->state() == QProcess::NotRunning)
-        delete process;
-    else
-        process->deleteLater();
+    if (process->state() == QProcess::NotRunning) { delete process; return; }
+    // Do not block the GUI thread waiting for FFmpeg to exit; delete it from
+    // its own finished signal. Reparent so the window dtor does not wait on it.
+    process->setParent(nullptr);
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process, &QObject::deleteLater);
+    process->kill();
 }
 
 void BroadcastWindow::playSettlementPreview(const QString &type)
@@ -3549,6 +3715,14 @@ void BroadcastWindow::applyUiScale()
     }
 
     const auto px = [scale](int value) { return qMax(1, qRound(value * scale)); };
+    // Bright-venue readability: soft dark halo behind top HUD text.
+    applyTextShadow(m_timerLabel, scale, 18, 3, 240);
+    applyTextShadow(m_redRoundScoreLabel, scale, 14, 2, 230);
+    applyTextShadow(m_blueRoundScoreLabel, scale, 14, 2, 230);
+    applyTextShadow(m_matchTitle, scale, 10, 1.5, 230);
+    for (auto it = m_overlays.begin(); it != m_overlays.end(); ++it)
+        applyTextShadow(it->team, scale, 12, 2, 230);
+    if (m_hudOverlay) m_hudOverlay->update();
     if (m_matchTitle && m_titleLayer) {
         QFont font = m_matchTitle->font();
         font.setPixelSize(px(20));

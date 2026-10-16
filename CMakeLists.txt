@@ -274,6 +274,10 @@ add_executable(FieldCameraTest tools/field_camera_test.cpp tools/fake_field_came
 target_include_directories(FieldCameraTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(FieldCameraTest PRIVATE Qt${QT_VERSION_MAJOR}::Core
     Qt${QT_VERSION_MAJOR}::Gui Qt${QT_VERSION_MAJOR}::Multimedia)
+# Manual hardware probe (not registered with CTest).
+add_executable(CameraLatencyProbe tools/camera_latency_probe.cpp fieldcamera.cpp fieldcamera.h videoformatselect.h)
+target_include_directories(CameraLatencyProbe PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(CameraLatencyProbe PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Multimedia)
 add_executable(CheckinModelTest tools/checkin_model_test.cpp checkinmodel.cpp checkinmodel.h)
 target_include_directories(CheckinModelTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(CheckinModelTest PRIVATE Qt${QT_VERSION_MAJOR}::Core)
@@ -325,6 +329,10 @@ add_executable(ArmorThresholdTest tools/armor_threshold_test.cpp ${_competition_
 target_include_directories(ArmorThresholdTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ArmorThresholdTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
     Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
+add_executable(HudBrightTest tools/hud_bright_test.cpp ${_competition_integration_sources})
+target_include_directories(HudBrightTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(HudBrightTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia Qt${QT_VERSION_MAJOR}::OpenGLWidgets)
 add_executable(BgmSingleCarTest tools/bgm_single_car_test.cpp ${_competition_integration_sources})
 target_include_directories(BgmSingleCarTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(BgmSingleCarTest PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network
@@ -346,10 +354,11 @@ add_test(NAME match_timing_presets COMMAND MatchTimingPresetTest)
 add_test(NAME manual_damage COMMAND ManualDamageTest)
 add_test(NAME armor_threshold COMMAND ArmorThresholdTest)
 add_test(NAME bgm_single_car COMMAND BgmSingleCarTest)
+add_test(NAME hud_bright COMMAND HudBrightTest)
 add_test(NAME native_video COMMAND NativeVideoTest)
 set_tests_properties(native_video PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
 set_tests_properties(revive_protocol referee_entry_panel competition_ui competition_integration no_device_debug
-    match_timing_presets manual_damage armor_threshold bgm_single_car PROPERTIES
+    match_timing_presets manual_damage armor_threshold bgm_single_car hud_bright PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 120 RUN_SERIAL TRUE)
 add_test(NAME client_login_ui COMMAND ClientLoginUiTest)
 set_tests_properties(client_login_ui PROPERTIES
